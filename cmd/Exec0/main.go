@@ -1,12 +1,50 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"time"
+
 	"github.com/aarctanz/Exec0/internal/config"
+	"github.com/aarctanz/Exec0/internal/server"
 )
 
+const DefaultContextTimeout = 30
+
 func main() {
-	_, err := config.LoadConfig()
+	cfg, err := config.LoadConfig()
 	if err != nil {
 		panic("failed to load config: " + err.Error())
 	}
+
+	srv, err := server.New(cfg)
+	if err != nil {
+		panic("failed to create server: " + err.Error())
+	}
+
+	r := http.NewServeMux()
+	srv.SetupHTTPServer(r)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+
+	go func() {
+		if err = srv.Start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Fatal("failed to start server")
+		}
+	}()
+
+	<-ctx.Done()
+	ctx, cancel := context.WithTimeout(context.Background(), DefaultContextTimeout*time.Second)
+
+	if err = srv.Shutdown(ctx); err != nil {
+		log.Fatal("server forced to shutdown")
+	}
+	stop()
+	cancel()
+
+	log.Print("server exited properly")
 }
