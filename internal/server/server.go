@@ -9,16 +9,24 @@ import (
 	"time"
 
 	"github.com/aarctanz/Exec0/internal/config"
+	"github.com/aarctanz/Exec0/internal/database"
 )
 
 type Server struct {
 	Config     *config.Config
+	DB         *database.Database
 	httpServer *http.Server
 }
 
 func New(cfg *config.Config) (*Server, error) {
+	db, err := database.New(cfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create database: %w", err)
+	}
+
 	return &Server{
 		Config: cfg,
+		DB:     db,
 	}, nil
 }
 
