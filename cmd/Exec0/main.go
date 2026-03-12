@@ -1,7 +1,12 @@
 package main
 
-import "fmt"
+import (
+	"github.com/aarctanz/Exec0/internal/config"
+)
 
 func main() {
-	fmt.Println("Hello, World!")
+	_, err := config.LoadConfig()
+	if err != nil {
+		panic("failed to load config: " + err.Error())
+	}
 }
