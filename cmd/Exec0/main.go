@@ -10,7 +10,9 @@ import (
 	"time"
 
 	"github.com/aarctanz/Exec0/internal/config"
+	"github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/aarctanz/Exec0/internal/server"
+	"github.com/aarctanz/Exec0/internal/services"
 )
 
 const DefaultContextTimeout = 30
@@ -25,6 +27,9 @@ func main() {
 	if err != nil {
 		panic("failed to create server: " + err.Error())
 	}
+
+	queries := queries.New(srv.DB.Pool)
+	_ = services.New(queries)
 
 	r := http.NewServeMux()
 	srv.SetupHTTPServer(r)

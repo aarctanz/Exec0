@@ -14,7 +14,7 @@ import (
 )
 
 type Database struct {
-	pool *pgxpool.Pool
+	Pool *pgxpool.Pool
 }
 
 const DatabasePingTimeout = 10
@@ -42,12 +42,12 @@ func New(cfg *config.Config) (*Database, error) {
 		return nil, fmt.Errorf("failed to create pgx pool: %w", err)
 	}
 
-	database := &Database{pool: pool}
+	database := &Database{Pool: pool}
 
 	ctx, cancel := context.WithTimeout(context.Background(), DatabasePingTimeout*time.Second)
 	defer cancel()
 
-	if err = database.pool.Ping(ctx); err != nil {
+	if err = database.Pool.Ping(ctx); err != nil {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
