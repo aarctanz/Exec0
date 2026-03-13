@@ -84,6 +84,32 @@ func (q *Queries) GetLanguageByID(ctx context.Context, id int64) (GetLanguageByI
 	return i, err
 }
 
+const getPublicLanguageByID = `-- name: GetPublicLanguageByID :one
+SELECT id, name, version, is_archived
+FROM languages
+WHERE id = $1
+LIMIT 1
+`
+
+type GetPublicLanguageByIDRow struct {
+	ID         int64  `db:"id" json:"id"`
+	Name       string `db:"name" json:"name"`
+	Version    string `db:"version" json:"version"`
+	IsArchived bool   `db:"is_archived" json:"is_archived"`
+}
+
+func (q *Queries) GetPublicLanguageByID(ctx context.Context, id int64) (GetPublicLanguageByIDRow, error) {
+	row := q.db.QueryRow(ctx, getPublicLanguageByID, id)
+	var i GetPublicLanguageByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Version,
+		&i.IsArchived,
+	)
+	return i, err
+}
+
 const listActiveLanguages = `-- name: ListActiveLanguages :many
 SELECT id, name, version, source_file, compile_command, run_command FROM languages
 WHERE is_archived = FALSE
@@ -156,6 +182,44 @@ func (q *Queries) ListLanguages(ctx context.Context) ([]ListLanguagesRow, error)
 			&i.SourceFile,
 			&i.CompileCommand,
 			&i.RunCommand,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPublicLanguages = `-- name: ListPublicLanguages :many
+SELECT id, name, version, is_archived
+FROM languages
+ORDER BY name
+`
+
+type ListPublicLanguagesRow struct {
+	ID         int64  `db:"id" json:"id"`
+	Name       string `db:"name" json:"name"`
+	Version    string `db:"version" json:"version"`
+	IsArchived bool   `db:"is_archived" json:"is_archived"`
+}
+
+func (q *Queries) ListPublicLanguages(ctx context.Context) ([]ListPublicLanguagesRow, error) {
+	rows, err := q.db.Query(ctx, listPublicLanguages)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPublicLanguagesRow
+	for rows.Next() {
+		var i ListPublicLanguagesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Version,
+			&i.IsArchived,
 		); err != nil {
 			return nil, err
 		}

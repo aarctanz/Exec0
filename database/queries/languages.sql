@@ -23,3 +23,14 @@ ORDER BY id;
 SELECT id, name, version, source_file, compile_command, run_command FROM languages
 WHERE is_archived = FALSE
 ORDER BY id;
+
+-- name: ListPublicLanguages :many
+SELECT id, name, version, is_archived
+FROM languages
+ORDER BY name;
+
+-- name: GetPublicLanguageByID :one
+SELECT id, name, version, is_archived
+FROM languages
+WHERE id = $1
+LIMIT 1;
