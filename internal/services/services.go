@@ -1,13 +1,22 @@
 package services
 
-import "github.com/aarctanz/Exec0/internal/database/queries"
+import (
+	"github.com/aarctanz/Exec0/internal/config"
+	"github.com/aarctanz/Exec0/internal/database/queries"
+)
 
 type Services struct {
-	LanguagesService *LanguagesService
+	LanguagesService   *LanguagesService
+	SubmissionsService *SubmissionsService
 }
 
 func New(queries *queries.Queries) *Services {
+	languagesService := NewLanguagesService(queries)
+	executionConfig := config.DefaultExecutionConfig()
+
+	submissionsService := NewSubmissionsService(queries, languagesService, executionConfig)
 	return &Services{
-		LanguagesService: NewLanguagesService(queries),
+		LanguagesService:   languagesService,
+		SubmissionsService: submissionsService,
 	}
 }
