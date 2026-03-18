@@ -28,6 +28,23 @@ func NewSubmissionsService(queries *queries.Queries, languageService *LanguagesS
 	}
 }
 
+func (s *SubmissionsService) ListSubmissions(page, perPage int32) ([]queries.Submission, error) {
+	if page < 1 {
+		page = 1
+	}
+	if perPage < 1 {
+		perPage = 20
+	}
+	if perPage > 100 {
+		perPage = 100
+	}
+	offset := (page - 1) * perPage
+	return s.queries.ListSubmissions(context.Background(), queries.ListSubmissionsParams{
+		Limit:  perPage,
+		Offset: offset,
+	})
+}
+
 func (s *SubmissionsService) GetSubmissionById(submissionID int) (queries.Submission, error) {
 	sub, err := s.queries.GetSubmissionByID(context.Background(), int64(submissionID))
 	if err != nil {

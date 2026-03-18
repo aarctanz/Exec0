@@ -246,10 +246,16 @@ func (q *Queries) GetSubmissionByID(ctx context.Context, id int64) (Submission, 
 const listSubmissions = `-- name: ListSubmissions :many
 SELECT id, language_id, source_code, stdin, status, compile_output, stdout, stderr, message, internal_error, exit_code, exit_signal, cpu_time_limit, cpu_extra_time, wall_time_limit, memory_limit, stack_limit, max_processes_and_or_threads, enable_per_process_and_thread_time_limit, enable_per_process_and_thread_memory_limit, max_file_size, number_of_runs, redirect_stderr_to_stdout, enable_network, time, wall_time, memory, started_at, finished_at, created_at, updated_at FROM submissions
 ORDER BY created_at DESC
+LIMIT $1 OFFSET $2
 `
 
-func (q *Queries) ListSubmissions(ctx context.Context) ([]Submission, error) {
-	rows, err := q.db.Query(ctx, listSubmissions)
+type ListSubmissionsParams struct {
+	Limit  int32 `db:"limit" json:"limit"`
+	Offset int32 `db:"offset" json:"offset"`
+}
+
+func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams) ([]Submission, error) {
+	rows, err := q.db.Query(ctx, listSubmissions, arg.Limit, arg.Offset)
 	if err != nil {
 		return nil, err
 	}

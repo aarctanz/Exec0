@@ -18,6 +18,18 @@ func NewSubmissionsHandler(service *services.SubmissionsService) *SubmissionsHan
 	return &SubmissionsHandler{service: service}
 }
 
+func (h *SubmissionsHandler) List(w http.ResponseWriter, r *http.Request) {
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+
+	subs, err := h.service.ListSubmissions(int32(page), int32(perPage))
+	if err != nil {
+		util.Error(w, http.StatusInternalServerError, "failed to fetch submissions")
+		return
+	}
+	util.JSON(w, http.StatusOK, subs)
+}
+
 func (h *SubmissionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	var dto submissions.CreateSubmissionDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {

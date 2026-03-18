@@ -14,9 +14,12 @@ func SetupRoutes(svc *services.Services, corsOrigins []string) http.Handler {
 	languages := handlers.NewLanguagesHandler(svc.LanguagesService)
 	submissions := handlers.NewSubmissionsHandler(svc.SubmissionsService)
 
+	mux.HandleFunc("GET /health", handlers.Health)
+
 	mux.HandleFunc("GET /languages", languages.List)
 	mux.HandleFunc("GET /languages/{id}", languages.Get)
 
+	mux.HandleFunc("GET /submissions", submissions.List)
 	mux.HandleFunc("POST /submissions", submissions.Create)
 	mux.HandleFunc("GET /submissions/{id}", submissions.Get)
 
