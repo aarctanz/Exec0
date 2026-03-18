@@ -33,10 +33,10 @@ func main() {
 	defer queueClient.Close()
 
 	queries := queries.New(srv.DB.Pool)
-	_ = services.New(queries, queueClient)
+	svc := services.New(queries, queueClient)
 
-	r := http.NewServeMux()
-	srv.SetupHTTPServer(r)
+	handler := server.SetupRoutes(svc, cfg.Server.CORSAllowedOrigins)
+	srv.SetupHTTPServer(handler)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 
