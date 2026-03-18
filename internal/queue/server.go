@@ -1,25 +1,46 @@
 package queue
 
 import (
+	"context"
+	"encoding/json"
+	"log"
+
+	"github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/aarctanz/Exec0/internal/queue/tasks"
 	"github.com/hibiken/asynq"
+	"github.com/jackc/pgx/v5/pgtype"
 )
 
-func NewServer(redisAddr string, concurrency int) *asynq.Server {
+func NewServer(redisAddr string, concurrency int, dbQueries *queries.Queries) *asynq.Server {
 	return asynq.NewServer(
 		asynq.RedisClientOpt{Addr: redisAddr},
 		asynq.Config{
 			Concurrency:    concurrency,
 			RetryDelayFunc: asynq.DefaultRetryDelayFunc,
+			ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
+				retried, _ := asynq.GetRetryCount(ctx)
+				maxRetry, _ := asynq.GetMaxRetry(ctx)
+				if retried >= maxRetry {
+					var payload tasks.SubmissionPayload
+					if jsonErr := json.Unmarshal(task.Payload(), &payload); jsonErr != nil {
+						log.Printf("failed to unmarshal payload in error handler: %v", jsonErr)
+						return
+					}
+					log.Printf("submission %d exhausted all retries, marking as internal_error: %v", payload.SubmissionID, err)
+					dbQueries.CompleteSubmission(ctx, queries.CompleteSubmissionParams{
+						ID:            payload.SubmissionID,
+						Status:        "internal_error",
+						InternalError: pgtype.Text{String: err.Error(), Valid: true},
+					})
+				}
+			}),
 		},
 	)
 }
 
-// NewServeMux registers task handlers and returns a mux ready to be
-// passed to server.Run(). Same pattern as http.ServeMux — each task
-// type maps to a handler function.
-func NewServeMux() *asynq.ServeMux {
+// NewServeMux registers task handlers and returns a mux.
+func NewServeMux(submissionHandler func(context.Context, *asynq.Task) error) *asynq.ServeMux {
 	mux := asynq.NewServeMux()
-	mux.HandleFunc(tasks.TypeSubmissionExecute, tasks.HandleSubmissionExecute)
+	mux.HandleFunc(tasks.TypeSubmissionExecute, submissionHandler)
 	return mux
 }

@@ -22,7 +22,7 @@ func (c *Client) EnqueueSubmission(submissionID int64) error {
 		return fmt.Errorf("failed to create submission task: %w", err)
 	}
 
-	_, err = c.client.Enqueue(task)
+	_, err = c.client.Enqueue(task, asynq.MaxRetry(3))
 	if err != nil {
 		return fmt.Errorf("failed to enqueue submission task: %w", err)
 	}
