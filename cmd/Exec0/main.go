@@ -11,6 +11,7 @@ import (
 
 	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/aarctanz/Exec0/internal/database/queries"
+	"github.com/aarctanz/Exec0/internal/queue"
 	"github.com/aarctanz/Exec0/internal/server"
 	"github.com/aarctanz/Exec0/internal/services"
 )
@@ -28,8 +29,11 @@ func main() {
 		panic("failed to create server: " + err.Error())
 	}
 
+	queueClient := queue.NewClient(cfg.Redis.Address)
+	defer queueClient.Close()
+
 	queries := queries.New(srv.DB.Pool)
-	_ = services.New(queries)
+	_ = services.New(queries, queueClient)
 
 	r := http.NewServeMux()
 	srv.SetupHTTPServer(r)

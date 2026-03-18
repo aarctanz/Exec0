@@ -3,10 +3,12 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/aarctanz/Exec0/internal/models/submissions"
+	"github.com/aarctanz/Exec0/internal/queue"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -14,13 +16,15 @@ type SubmissionsService struct {
 	queries          *queries.Queries
 	languagesService *LanguagesService
 	executionConfig  *config.ExecutionConfig
+	queueClient      *queue.Client
 }
 
-func NewSubmissionsService(queries *queries.Queries, languageService *LanguagesService, executionConfig *config.ExecutionConfig) *SubmissionsService {
+func NewSubmissionsService(queries *queries.Queries, languageService *LanguagesService, executionConfig *config.ExecutionConfig, queueClient *queue.Client) *SubmissionsService {
 	return &SubmissionsService{
 		queries:          queries,
 		languagesService: languageService,
 		executionConfig:  executionConfig,
+		queueClient:      queueClient,
 	}
 }
 
@@ -90,7 +94,9 @@ func (s *SubmissionsService) CreateSubmission(dto submissions.CreateSubmissionDT
 		return 0, err
 	}
 
-	// TODO: add submission ID to execution queue
+	if err := s.queueClient.EnqueueSubmission(sub.ID); err != nil {
+		return 0, fmt.Errorf("failed to enqueue submission: %w", err)
+	}
 
 	return sub.ID, nil
 }

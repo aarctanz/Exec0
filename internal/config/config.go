@@ -10,6 +10,7 @@ type Config struct {
 	Primary  PrimaryConfig  `env-prefix:"PRIMARY_"`
 	Server   ServerConfig   `env-prefix:"SERVER_"`
 	Database DatabaseConfig `env-prefix:"DATABASE_"`
+	Redis    RedisConfig    `env-prefix:"REDIS_"`
 }
 
 type PrimaryConfig struct {
@@ -35,6 +36,10 @@ type DatabaseConfig struct {
 	MaxIdleConns    int    `env:"MAX_IDLE_CONNS" env-required:"true"`
 	ConnMaxLifetime int    `env:"CONN_MAX_LIFETIME" env-required:"true"`
 	ConnMaxIdleTime int    `env:"CONN_MAX_IDLE_TIME" env-required:"true"`
+}
+
+type RedisConfig struct {
+	Address string `env:"ADDRESS" env-required:"true"`
 }
 
 func LoadConfig() (*Config, error) {
