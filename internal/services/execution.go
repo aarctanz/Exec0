@@ -75,6 +75,7 @@ type Metadata struct {
 
 // Execute is the main entry point called by the worker.
 func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) error {
+	startTime := time.Now()
 	log := logger.FromContext(ctx).With().Int64("submission_id", submissionID).Logger()
 	log.Info().Msg("starting execution")
 
@@ -202,6 +203,9 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 		Float64("total_duration_s", finishedAt.Sub(startedAt).Seconds()).
 		Msg("completing submission")
 	e.completeSubmission(ctx, &log, sub.ID, status, "", string(stdout), string(stderr), runMeta, startedAt, finishedAt)
+	log.Info().
+		Float64("execution_time_s", time.Since(startTime).Seconds()).
+		Msg("execution complete")
 	return nil
 }
 
