@@ -3,7 +3,8 @@ package queue
 import (
 	"context"
 	"encoding/json"
-	"log"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/aarctanz/Exec0/internal/queue/tasks"
@@ -23,10 +24,13 @@ func NewServer(redisAddr string, concurrency int, dbQueries *queries.Queries) *a
 				if retried >= maxRetry {
 					var payload tasks.SubmissionPayload
 					if jsonErr := json.Unmarshal(task.Payload(), &payload); jsonErr != nil {
-						log.Printf("failed to unmarshal payload in error handler: %v", jsonErr)
+						log.Error().Err(jsonErr).Msg("failed to unmarshal payload in error handler")
 						return
 					}
-					log.Printf("submission %d exhausted all retries, marking as internal_error: %v", payload.SubmissionID, err)
+					log.Error().
+						Int64("submission_id", payload.SubmissionID).
+						Err(err).
+						Msg("submission exhausted all retries, marking as internal_error")
 					dbQueries.CompleteSubmission(ctx, queries.CompleteSubmissionParams{
 						ID:            payload.SubmissionID,
 						Status:        "internal_error",

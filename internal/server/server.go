@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/aarctanz/Exec0/internal/database"
@@ -45,9 +46,10 @@ func (s *Server) Start() error {
 		return errors.New("HTTP server not initialized")
 	}
 
-	log.Printf("Port: %v\n", s.Config.Server.Port)
-	log.Printf("env: %v\n", s.Config.Primary.Env)
-	log.Println("Server started")
+	log.Info().
+		Str("port", s.Config.Server.Port).
+		Str("env", s.Config.Primary.Env).
+		Msg("server started")
 
 	return s.httpServer.ListenAndServe()
 }

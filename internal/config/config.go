@@ -1,7 +1,7 @@
 package config
 
 import (
-	"log"
+	"fmt"
 
 	"github.com/ilyakaznacheev/cleanenv"
 )
@@ -47,7 +47,7 @@ func LoadConfig() (*Config, error) {
 
 	err := cleanenv.ReadConfig(".env", &cfg)
 	if err != nil {
-		log.Fatal("could not load initial env variables")
+		return nil, fmt.Errorf("could not load env variables: %w", err)
 	}
 
 	return &cfg, nil

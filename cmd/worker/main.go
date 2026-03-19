@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"os"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/aarctanz/Exec0/internal/database"
 	dbqueries "github.com/aarctanz/Exec0/internal/database/queries"
+	"github.com/aarctanz/Exec0/internal/logger"
 	"github.com/aarctanz/Exec0/internal/queue"
 	"github.com/aarctanz/Exec0/internal/queue/tasks"
 	"github.com/aarctanz/Exec0/internal/services"
@@ -20,20 +23,20 @@ const defaultConcurrency = 10
 func main() {
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		log.Fatal("failed to load config: " + err.Error())
+		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		os.Exit(1)
 	}
+
+	logger.Init(cfg.Primary.Env)
 
 	db, err := database.New(cfg)
 	if err != nil {
-		log.Fatal("failed to connect to database: " + err.Error())
+		log.Fatal().Err(err).Msg("failed to connect to database")
 	}
 
 	queries := dbqueries.New(db.Pool)
 	executionService := services.NewExecutionService(queries)
 
-	// Build the handler as a closure that delegates to ExecutionService.
-	// This avoids circular imports: queue/tasks doesn't import services,
-	// the wiring happens here in main.
 	submissionHandler := func(ctx context.Context, t *asynq.Task) error {
 		var payload tasks.SubmissionPayload
 		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
@@ -45,9 +48,9 @@ func main() {
 	srv := queue.NewServer(cfg.Redis.Address, defaultConcurrency, queries)
 	mux := queue.NewServeMux(submissionHandler)
 
-	log.Println("Starting worker with concurrency", defaultConcurrency)
+	log.Info().Int("concurrency", defaultConcurrency).Msg("starting worker")
 
 	if err := srv.Run(mux); err != nil {
-		log.Fatal("failed to run worker: " + err.Error())
+		log.Fatal().Err(err).Msg("failed to run worker")
 	}
 }

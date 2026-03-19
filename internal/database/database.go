@@ -3,11 +3,12 @@ package database
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"net/url"
 	"strconv"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -51,6 +52,6 @@ func New(cfg *config.Config) (*Database, error) {
 		return nil, fmt.Errorf("failed to ping database: %w", err)
 	}
 
-	log.Println("connected to database")
+	log.Info().Msg("connected to database")
 	return database, nil
 }
