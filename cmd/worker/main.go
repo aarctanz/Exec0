@@ -21,7 +21,10 @@ import (
 	"github.com/hibiken/asynq"
 )
 
-func getConcurrency() int {
+func getConcurrency(cfg config.WorkerConfig) int {
+	if cfg.Concurrency > 0 {
+		return cfg.Concurrency
+	}
 	n := runtime.NumCPU()
 	if n < 2 {
 		return 2
@@ -55,7 +58,7 @@ func main() {
 		return executionService.Execute(ctx, payload.SubmissionID)
 	}
 
-	concurrency := getConcurrency()
+	concurrency := getConcurrency(cfg.Worker)
 	srv := queue.NewServer(cfg.Redis.Address, concurrency, queries)
 	mux := queue.NewServeMux(submissionHandler)
 

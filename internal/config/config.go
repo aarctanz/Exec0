@@ -11,6 +11,11 @@ type Config struct {
 	Server   ServerConfig   `env-prefix:"SERVER_"`
 	Database DatabaseConfig `env-prefix:"DATABASE_"`
 	Redis    RedisConfig    `env-prefix:"REDIS_"`
+	Worker   WorkerConfig   `env-prefix:"WORKER_"`
+}
+
+type WorkerConfig struct {
+	Concurrency int `env:"CONCURRENCY"`
 }
 
 type PrimaryConfig struct {

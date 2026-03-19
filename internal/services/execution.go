@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
@@ -21,35 +21,15 @@ import (
 
 const maxBoxID = 999
 
-// boxPool manages allocation of isolate box IDs to prevent collisions.
-type boxPool struct {
-	mu   sync.Mutex
-	used map[int]bool
-}
+var boxIDCounter atomic.Int64
 
-var globalBoxPool = &boxPool{used: make(map[int]bool)}
-
-func (p *boxPool) acquire(hint int64) int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	id := int(hint % int64(maxBoxID))
-	if !p.used[id] {
-		p.used[id] = true
-		return id
-	}
+func nextBoxID(hint int64) int {
+	start := int(hint % int64(maxBoxID))
 	for i := 0; i < maxBoxID; i++ {
-		if !p.used[i] {
-			p.used[i] = true
-			return i
-		}
+		id := (start + i) % maxBoxID
+		_ = id
 	}
-	return -1
-}
-
-func (p *boxPool) release(id int) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	delete(p.used, id)
+	return int(boxIDCounter.Add(1) % int64(maxBoxID))
 }
 
 type ExecutionService struct {
@@ -106,12 +86,7 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 		Bool("has_compile", lang.CompileCommand.Valid).
 		Msg("language resolved")
 
-	boxID := globalBoxPool.acquire(submissionID)
-	if boxID < 0 {
-		log.Error().Msg("no free box IDs available")
-		return fmt.Errorf("no free box IDs available")
-	}
-	defer globalBoxPool.release(boxID)
+	boxID := nextBoxID(submissionID)
 
 	log = log.With().Int("box_id", boxID).Logger()
 
