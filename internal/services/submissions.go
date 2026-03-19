@@ -39,10 +39,17 @@ func (s *SubmissionsService) ListSubmissions(page, perPage int32) ([]queries.Sub
 		perPage = 100
 	}
 	offset := (page - 1) * perPage
-	return s.queries.ListSubmissions(context.Background(), queries.ListSubmissionsParams{
+	subs, err := s.queries.ListSubmissions(context.Background(), queries.ListSubmissionsParams{
 		Limit:  perPage,
 		Offset: offset,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if subs == nil {
+		subs = []queries.Submission{}
+	}
+	return subs, nil
 }
 
 func (s *SubmissionsService) GetSubmissionById(submissionID int) (queries.Submission, error) {

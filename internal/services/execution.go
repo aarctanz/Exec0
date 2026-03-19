@@ -10,13 +10,47 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
-const maxBoxID = 2147483647 // 2^31 - 1
+const maxBoxID = 999
+
+// boxPool manages allocation of isolate box IDs to prevent collisions.
+type boxPool struct {
+	mu   sync.Mutex
+	used map[int]bool
+}
+
+var globalBoxPool = &boxPool{used: make(map[int]bool)}
+
+func (p *boxPool) acquire(hint int64) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Try hint first
+	id := int(hint % int64(maxBoxID))
+	if !p.used[id] {
+		p.used[id] = true
+		return id
+	}
+	// Linear scan for a free box
+	for i := 0; i < maxBoxID; i++ {
+		if !p.used[i] {
+			p.used[i] = true
+			return i
+		}
+	}
+	return -1
+}
+
+func (p *boxPool) release(id int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	delete(p.used, id)
+}
 
 type ExecutionService struct {
 	queries *queries.Queries
@@ -41,86 +75,105 @@ type Metadata struct {
 
 // Execute is the main entry point called by the worker.
 func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) error {
+	log.Printf("[sub %d] starting execution", submissionID)
+
 	sub, err := e.queries.GetSubmissionByID(ctx, submissionID)
 	if err != nil {
+		log.Printf("[sub %d] failed to fetch submission: %v", submissionID, err)
 		return fmt.Errorf("failed to fetch submission %d: %w", submissionID, err)
 	}
+	log.Printf("[sub %d] fetched: lang=%d mem=%dKB cpu=%.1fs wall=%.1fs processes=%d fsize=%dKB network=%v",
+		submissionID, sub.LanguageID, sub.MemoryLimit, sub.CpuTimeLimit, sub.WallTimeLimit,
+		sub.MaxProcessesAndOrThreads, sub.MaxFileSize, sub.EnableNetwork)
 
 	lang, err := e.queries.GetLanguageByID(ctx, sub.LanguageID)
 	if err != nil {
+		log.Printf("[sub %d] failed to fetch language %d: %v", submissionID, sub.LanguageID, err)
 		return fmt.Errorf("failed to fetch language %d: %w", sub.LanguageID, err)
 	}
+	log.Printf("[sub %d] language: %s %s, source_file=%s, has_compile=%v",
+		submissionID, lang.Name, lang.Version, lang.SourceFile, lang.CompileCommand.Valid)
 
-	boxID := int(submissionID % maxBoxID)
+	boxID := globalBoxPool.acquire(submissionID)
+	if boxID < 0 {
+		log.Printf("[sub %d] no free box IDs available", submissionID)
+		return fmt.Errorf("no free box IDs available")
+	}
+	defer globalBoxPool.release(boxID)
 
+	log.Printf("[sub %d] initializing box %d", submissionID, boxID)
 	boxDir, err := e.initBox(boxID)
 	if err != nil {
+		log.Printf("[sub %d] box init failed: %v", submissionID, err)
 		return fmt.Errorf("failed to init box %d: %w", boxID, err)
 	}
+	log.Printf("[sub %d] box %d ready at %s", submissionID, boxID, boxDir)
 	defer e.cleanupBox(boxID)
 
+	log.Printf("[sub %d] writing source (%d bytes) and stdin (%d bytes)",
+		submissionID, len(sub.SourceCode), len(sub.Stdin.String))
 	if err := e.createFiles(boxDir, sub.SourceCode, lang.SourceFile, sub.Stdin.String); err != nil {
+		log.Printf("[sub %d] failed to create files: %v", submissionID, err)
 		return fmt.Errorf("failed to create files in box %d: %w", boxID, err)
 	}
 
 	startedAt := time.Now()
+	metaFile := filepath.Join(os.TempDir(), fmt.Sprintf("isolate_meta_%d.txt", boxID))
+	defer os.Remove(metaFile)
 
 	// Compile if language has a compile command
 	if lang.CompileCommand.Valid {
+		log.Printf("[sub %d] compiling with: %s", submissionID, lang.CompileCommand.String)
 		e.updateStatus(ctx, submissionID, "compiling")
 
-		compileMetaFile := filepath.Join(boxDir, "meta_compile.txt")
-		compileMeta, compileOutput, err := e.compile(boxID, lang.CompileCommand.String, compileMetaFile, sub)
+		compileMeta, compileOutput, err := e.compile(boxID, lang.CompileCommand.String, metaFile, sub)
 		if err != nil {
+			log.Printf("[sub %d] compile step failed: %v", submissionID, err)
 			return fmt.Errorf("compilation error in box %d: %w", boxID, err)
 		}
 
+		log.Printf("[sub %d] compile done: exit_code=%d status=%q time=%.3fs mem=%dKB output=%q",
+			submissionID, compileMeta.ExitCode, compileMeta.Status, compileMeta.Time,
+			compileMeta.Memory, truncate(compileOutput, 200))
+
 		if compileMeta.Status != "" || compileMeta.ExitCode != 0 {
 			finishedAt := time.Now()
+			log.Printf("[sub %d] compilation error, completing submission", submissionID)
 			e.completeSubmission(ctx, sub.ID, "compilation_error", compileOutput, "", "", compileMeta, startedAt, finishedAt)
 			return nil
 		}
+
+		log.Printf("[sub %d] compilation succeeded, resetting metadata", submissionID)
+		os.Remove(metaFile)
 	}
 
-	// Run (supports number_of_runs)
+	// Run
+	log.Printf("[sub %d] running with: %s", submissionID, lang.RunCommand)
 	e.updateStatus(ctx, submissionID, "running")
 
-	numRuns := int(sub.NumberOfRuns)
-	if numRuns < 1 {
-		numRuns = 1
-	}
-
-	var bestMeta *Metadata
-	for i := 0; i < numRuns; i++ {
-		runMetaFile := filepath.Join(boxDir, fmt.Sprintf("meta_run_%d.txt", i))
-		runMeta, err := e.run(boxID, lang.RunCommand, runMetaFile, sub)
-		if err != nil {
-			return fmt.Errorf("run error in box %d: %w", boxID, err)
-		}
-
-		// Keep the run with the lowest CPU time (best performance)
-		if bestMeta == nil || runMeta.Time < bestMeta.Time {
-			bestMeta = runMeta
-		}
-
-		// Stop early on failure
-		if runMeta.Status != "" {
-			bestMeta = runMeta
-			break
-		}
+	runMeta, err := e.run(boxID, lang.RunCommand, metaFile, sub)
+	if err != nil {
+		log.Printf("[sub %d] run step failed: %v", submissionID, err)
+		return fmt.Errorf("run error in box %d: %w", boxID, err)
 	}
 
 	finishedAt := time.Now()
 
+	log.Printf("[sub %d] run done: exit_code=%d exit_signal=%d status=%q time=%.3fs wall=%.3fs mem=%dKB message=%q",
+		submissionID, runMeta.ExitCode, runMeta.ExitSignal, runMeta.Status,
+		runMeta.Time, runMeta.WallTime, runMeta.Memory, runMeta.Message)
+
 	stdout, _ := os.ReadFile(filepath.Join(boxDir, "box", "stdout.txt"))
 	stderr, _ := os.ReadFile(filepath.Join(boxDir, "box", "stderr.txt"))
+	log.Printf("[sub %d] output: stdout=%d bytes, stderr=%d bytes", submissionID, len(stdout), len(stderr))
 
-	status := "completed"
-	if bestMeta.Status != "" {
-		status = e.mapIsolateStatus(bestMeta.Status)
+	status := "accepted"
+	if runMeta.Status != "" {
+		status = e.mapIsolateStatus(runMeta.Status)
 	}
 
-	e.completeSubmission(ctx, sub.ID, status, "", string(stdout), string(stderr), bestMeta, startedAt, finishedAt)
+	log.Printf("[sub %d] completing: status=%s, total_duration=%.3fs", submissionID, status, finishedAt.Sub(startedAt).Seconds())
+	e.completeSubmission(ctx, sub.ID, status, "", string(stdout), string(stderr), runMeta, startedAt, finishedAt)
 	return nil
 }
 
@@ -141,11 +194,27 @@ func (e *ExecutionService) mapIsolateStatus(isolateStatus string) string {
 }
 
 // initBox creates an isolate sandbox and returns the box directory path.
+// If a stale box exists, it cleans it up first and retries.
 func (e *ExecutionService) initBox(boxID int) (string, error) {
-	cmd := exec.Command("isolate", "--box-id", strconv.Itoa(boxID), "--init")
+	id := strconv.Itoa(boxID)
+	cmd := exec.Command("isolate", "--box-id", id, "--cg", "--init")
 	output, err := cmd.Output()
+	if err == nil {
+		return strings.TrimSpace(string(output)), nil
+	}
+
+	// Init failed — likely a stale box. Try cleaning up (with and without --cg) then retry.
+	log.Printf("[box %d] init failed, attempting stale box cleanup", boxID)
+	exec.Command("isolate", "--box-id", id, "--cg", "--cleanup").Run()
+	exec.Command("isolate", "--box-id", id, "--cleanup").Run()
+
+	cmd = exec.Command("isolate", "--box-id", id, "--cg", "--init")
+	output, err = cmd.Output()
 	if err != nil {
-		return "", fmt.Errorf("isolate --init failed: %w", err)
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			log.Printf("[box %d] isolate --init stderr: %s", boxID, string(exitErr.Stderr))
+		}
+		return "", fmt.Errorf("isolate --init failed after cleanup: %w", err)
 	}
 	return strings.TrimSpace(string(output)), nil
 }
@@ -170,17 +239,19 @@ func (e *ExecutionService) buildIsolateArgs(boxID int, metaFile string, sub quer
 	args := []string{
 		"--box-id", strconv.Itoa(boxID),
 		"--meta", metaFile,
-		"--mem", strconv.Itoa(int(sub.MemoryLimit)),
-		"--processes", strconv.Itoa(int(sub.MaxProcessesAndOrThreads)),
+		"--cg",
+		"--cg-mem", strconv.Itoa(int(sub.MemoryLimit)),
+		"--dir=/etc:maybe",
 		"--fsize", strconv.Itoa(int(sub.MaxFileSize)),
+		fmt.Sprintf("--processes=%d", sub.MaxProcessesAndOrThreads),
 	}
 
 	if sub.EnablePerProcessAndThreadTimeLimit {
-		args = append(args, "--cg", "--cg-timing")
+		args = append(args, "--cg-timing")
 	}
 
 	if sub.EnablePerProcessAndThreadMemoryLimit {
-		args = append(args, "--cg", "--cg-mem", strconv.Itoa(int(sub.MemoryLimit)))
+		args = append(args, "--mem", strconv.Itoa(int(sub.MemoryLimit)))
 	}
 
 	if sub.EnableNetwork {
@@ -203,12 +274,20 @@ func (e *ExecutionService) compile(boxID int, compileCmd, metaFile string, sub q
 		"/bin/bash", "-c", resolvedCmd,
 	)
 
+	log.Printf("[box %d] compile cmd: isolate %s", boxID, strings.Join(args, " "))
+
 	cmd := exec.Command("isolate", args...)
-	output, _ := cmd.CombinedOutput()
+	output, cmdErr := cmd.CombinedOutput()
+
+	if cmdErr != nil {
+		log.Printf("[box %d] compile exited with error: %v, output: %s", boxID, cmdErr, truncate(string(output), 500))
+	}
 
 	meta, err := e.readMetadata(metaFile)
 	if err != nil {
-		return nil, string(output), fmt.Errorf("failed to read compile metadata: %w", err)
+		log.Printf("[box %d] failed to read compile metadata: %v (isolate error: %v, output: %s)",
+			boxID, err, cmdErr, truncate(string(output), 500))
+		return nil, string(output), fmt.Errorf("failed to read compile metadata (isolate error: %v, output: %s): %w", cmdErr, string(output), err)
 	}
 
 	return meta, string(output), nil
@@ -233,12 +312,20 @@ func (e *ExecutionService) run(boxID int, runCmd, metaFile string, sub queries.S
 
 	args = append(args, "--run", "--", "/bin/bash", "-c", runCmd)
 
+	log.Printf("[box %d] run cmd: isolate %s", boxID, strings.Join(args, " "))
+
 	cmd := exec.Command("isolate", args...)
-	cmd.Run()
+	output, cmdErr := cmd.CombinedOutput()
+
+	if cmdErr != nil {
+		log.Printf("[box %d] run exited with error: %v, output: %s", boxID, cmdErr, truncate(string(output), 500))
+	}
 
 	meta, err := e.readMetadata(metaFile)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read run metadata: %w", err)
+		log.Printf("[box %d] failed to read run metadata: %v (isolate error: %v, output: %s)",
+			boxID, err, cmdErr, truncate(string(output), 500))
+		return nil, fmt.Errorf("failed to read run metadata (isolate error: %v, output: %s): %w", cmdErr, string(output), err)
 	}
 
 	return meta, nil
@@ -289,14 +376,16 @@ func (e *ExecutionService) readMetadata(metaFile string) (*Metadata, error) {
 
 // cleanupBox destroys the isolate sandbox.
 func (e *ExecutionService) cleanupBox(boxID int) {
-	cmd := exec.Command("isolate", "--box-id", strconv.Itoa(boxID), "--cleanup")
+	log.Printf("[box %d] cleaning up", boxID)
+	cmd := exec.Command("isolate", "--box-id", strconv.Itoa(boxID), "--cg", "--cleanup")
 	if err := cmd.Run(); err != nil {
-		log.Printf("failed to cleanup box %d: %v", boxID, err)
+		log.Printf("[box %d] cleanup failed: %v", boxID, err)
 	}
 }
 
 // updateStatus updates submission status in the DB.
 func (e *ExecutionService) updateStatus(ctx context.Context, submissionID int64, status string) {
+	log.Printf("[sub %d] status -> %s", submissionID, status)
 	e.queries.UpdateSubmissionStatus(ctx, queries.UpdateSubmissionStatusParams{
 		ID:     submissionID,
 		Status: status,
@@ -305,6 +394,8 @@ func (e *ExecutionService) updateStatus(ctx context.Context, submissionID int64,
 
 // completeSubmission writes final results back to the DB.
 func (e *ExecutionService) completeSubmission(ctx context.Context, submissionID int64, status, compileOutput, stdout, stderr string, meta *Metadata, startedAt, finishedAt time.Time) {
+	log.Printf("[sub %d] completing: status=%s exit_code=%d time=%.3fs memory=%dKB",
+		submissionID, status, meta.ExitCode, meta.Time, meta.Memory)
 	e.queries.CompleteSubmission(ctx, queries.CompleteSubmissionParams{
 		ID:            submissionID,
 		Status:        status,
@@ -323,3 +414,11 @@ func (e *ExecutionService) completeSubmission(ctx context.Context, submissionID 
 	})
 }
 
+// truncate shortens a string for log output.
+func truncate(s string, max int) string {
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	if len(s) > max {
+		return s[:max] + "..."
+	}
+	return s
+}
