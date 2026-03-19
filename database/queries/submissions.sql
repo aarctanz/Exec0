@@ -28,7 +28,8 @@ LIMIT 1;
 
 -- name: ListSubmissions :many
 SELECT * FROM submissions
-ORDER BY created_at DESC;
+ORDER BY created_at DESC
+LIMIT $1 OFFSET $2;
 
 -- name: UpdateSubmissionStatus :exec
 UPDATE submissions
