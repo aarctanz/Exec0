@@ -39,7 +39,7 @@ func main() {
 	queries := queries.New(srv.DB.Pool)
 	svc := services.New(queries, queueClient)
 
-	handler := server.SetupRoutes(svc, cfg.Server.CORSAllowedOrigins)
+	handler := server.SetupRoutes(svc, cfg.Server.CORSAllowedOrigins, cfg.Redis.Address)
 	srv.SetupHTTPServer(handler)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

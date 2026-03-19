@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/signal"
+	"runtime"
+	"syscall"
 
 	"github.com/rs/zerolog/log"
 
@@ -18,7 +21,13 @@ import (
 	"github.com/hibiken/asynq"
 )
 
-const defaultConcurrency = 10
+func getConcurrency() int {
+	n := runtime.NumCPU()
+	if n < 2 {
+		return 2
+	}
+	return n * 2
+}
 
 func main() {
 	cfg, err := config.LoadConfig()
@@ -33,6 +42,7 @@ func main() {
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to connect to database")
 	}
+	defer db.Pool.Close()
 
 	queries := dbqueries.New(db.Pool)
 	executionService := services.NewExecutionService(queries)
@@ -45,12 +55,25 @@ func main() {
 		return executionService.Execute(ctx, payload.SubmissionID)
 	}
 
-	srv := queue.NewServer(cfg.Redis.Address, defaultConcurrency, queries)
+	concurrency := getConcurrency()
+	srv := queue.NewServer(cfg.Redis.Address, concurrency, queries)
 	mux := queue.NewServeMux(submissionHandler)
 
-	log.Info().Int("concurrency", defaultConcurrency).Msg("starting worker")
+	log.Info().Int("concurrency", concurrency).Msg("starting worker")
 
-	if err := srv.Run(mux); err != nil {
-		log.Fatal().Err(err).Msg("failed to run worker")
-	}
+	// Start server in a goroutine
+	go func() {
+		if err := srv.Run(mux); err != nil {
+			log.Fatal().Err(err).Msg("failed to run worker")
+		}
+	}()
+
+	// Wait for shutdown signal
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	sig := <-quit
+
+	log.Info().Str("signal", sig.String()).Msg("shutting down worker, waiting for active tasks to finish")
+	srv.Shutdown()
+	log.Info().Msg("worker stopped")
 }

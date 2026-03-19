@@ -276,9 +276,9 @@ func (e *ExecutionService) buildIsolateArgs(boxID int, metaFile string, sub quer
 		fmt.Sprintf("--processes=%d", sub.MaxProcessesAndOrThreads),
 	}
 
-	if sub.EnablePerProcessAndThreadTimeLimit {
-		args = append(args, "--cg-timing")
-	}
+	// Note: --cg-timing is not supported in isolate 2.2.1.
+	// With --cg enabled, --time already measures CPU time of the main process.
+	// EnablePerProcessAndThreadTimeLimit is acknowledged but has no additional effect.
 
 	if sub.EnablePerProcessAndThreadMemoryLimit {
 		args = append(args, "--mem", strconv.Itoa(int(sub.MemoryLimit)))
@@ -311,6 +311,9 @@ func (e *ExecutionService) compile(log *zerolog.Logger, boxID int, compileCmd, m
 
 	if cmdErr != nil {
 		log.Warn().Err(cmdErr).Str("output", truncate(string(output), 500)).Msg("compile exited with error")
+		if exitErr, ok := cmdErr.(*exec.ExitError); ok && exitErr.ExitCode() == 2 {
+			return nil, string(output), fmt.Errorf("isolate configuration error: %s", truncate(string(output), 500))
+		}
 	}
 
 	meta, err := e.readMetadata(metaFile)
@@ -348,6 +351,10 @@ func (e *ExecutionService) run(log *zerolog.Logger, boxID int, runCmd, metaFile 
 
 	if cmdErr != nil {
 		log.Warn().Err(cmdErr).Str("output", truncate(string(output), 500)).Msg("run exited with error")
+		// Exit code 2 = isolate usage/config error (not a sandboxed program failure)
+		if exitErr, ok := cmdErr.(*exec.ExitError); ok && exitErr.ExitCode() == 2 {
+			return nil, fmt.Errorf("isolate configuration error: %s", truncate(string(output), 500))
+		}
 	}
 
 	meta, err := e.readMetadata(metaFile)

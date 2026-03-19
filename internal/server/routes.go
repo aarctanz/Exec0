@@ -8,7 +8,7 @@ import (
 	"github.com/aarctanz/Exec0/internal/services"
 )
 
-func SetupRoutes(svc *services.Services, corsOrigins []string) http.Handler {
+func SetupRoutes(svc *services.Services, corsOrigins []string, redisAddr string) http.Handler {
 	mux := http.NewServeMux()
 
 	languages := handlers.NewLanguagesHandler(svc.LanguagesService)
@@ -22,6 +22,11 @@ func SetupRoutes(svc *services.Services, corsOrigins []string) http.Handler {
 	mux.HandleFunc("GET /submissions", submissions.List)
 	mux.HandleFunc("POST /submissions", submissions.Create)
 	mux.HandleFunc("GET /submissions/{id}", submissions.Get)
+
+	// Queue monitoring API
+	monitoring := handlers.NewMonitoringHandler(redisAddr)
+	mux.HandleFunc("GET /monitoring/queues", monitoring.Queues)
+	mux.HandleFunc("GET /monitoring/history", monitoring.History)
 
 	// Middleware chain: recovery → logging → CORS → router
 	var handler http.Handler = mux
