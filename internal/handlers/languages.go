@@ -17,7 +17,7 @@ func NewLanguagesHandler(service *services.LanguagesService) *LanguagesHandler {
 }
 
 func (h *LanguagesHandler) List(w http.ResponseWriter, r *http.Request) {
-	languages, err := h.service.GetPublicLanguages()
+	languages, err := h.service.GetPublicLanguages(r.Context())
 	if err != nil {
 		util.Error(w, http.StatusInternalServerError, "failed to fetch languages")
 		return
@@ -32,7 +32,7 @@ func (h *LanguagesHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	language, err := h.service.GetPublicLanguageByID(id)
+	language, err := h.service.GetPublicLanguageByID(r.Context(), id)
 	if err != nil {
 		util.Error(w, http.StatusNotFound, "language not found")
 		return

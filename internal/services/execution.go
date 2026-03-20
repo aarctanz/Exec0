@@ -13,10 +13,14 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/aarctanz/Exec0/internal/logger"
 	"github.com/aarctanz/Exec0/internal/metrics"
+	"github.com/aarctanz/Exec0/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -56,11 +60,21 @@ type Metadata struct {
 
 // Execute is the main entry point called by the worker.
 func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) error {
+	ctx, span := telemetry.Tracer("execution").Start(ctx, "Execute",
+		trace.WithAttributes(attribute.Int64("submission_id", submissionID)),
+	)
+	defer span.End()
+
 	startTime := time.Now()
 	metrics.WorkerActiveJobs.Inc()
 	defer metrics.WorkerActiveJobs.Dec()
 
-	log := logger.FromContext(ctx).With().Int64("submission_id", submissionID).Logger()
+	// Correlate logs with trace
+	traceID := span.SpanContext().TraceID().String()
+	log := logger.FromContext(ctx).With().
+		Int64("submission_id", submissionID).
+		Str("trace_id", traceID).
+		Logger()
 	log.Info().Msg("starting execution")
 
 	dbStart := time.Now()
@@ -68,6 +82,8 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 	metrics.DBOperationDuration.WithLabelValues("get_submission").Observe(time.Since(dbStart).Seconds())
 	if err != nil {
 		metrics.DBFailuresTotal.WithLabelValues("get_submission").Inc()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to fetch submission")
 		log.Error().Err(err).Msg("failed to fetch submission")
 		return fmt.Errorf("failed to fetch submission %d: %w", submissionID, err)
 	}
@@ -90,9 +106,15 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 	metrics.DBOperationDuration.WithLabelValues("get_language").Observe(time.Since(dbStart).Seconds())
 	if err != nil {
 		metrics.DBFailuresTotal.WithLabelValues("get_language").Inc()
+		span.RecordError(err)
+		span.SetStatus(codes.Error, "failed to fetch language")
 		log.Error().Err(err).Int64("language_id", sub.LanguageID).Msg("failed to fetch language")
 		return fmt.Errorf("failed to fetch language %d: %w", sub.LanguageID, err)
 	}
+	span.SetAttributes(
+		attribute.String("language", lang.Name),
+		attribute.String("language_version", lang.Version),
+	)
 	log.Info().
 		Str("language", lang.Name).
 		Str("version", lang.Version).
@@ -105,12 +127,19 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 	log = log.With().Int("box_id", boxID).Logger()
 
 	log.Info().Msg("initializing sandbox")
+	_, initSpan := telemetry.Tracer("execution").Start(ctx, "sandbox.init",
+		trace.WithAttributes(attribute.Int("box_id", boxID)),
+	)
 	boxDir, err := e.initBox(&log, boxID)
 	if err != nil {
+		initSpan.RecordError(err)
+		initSpan.SetStatus(codes.Error, "box init failed")
+		initSpan.End()
 		metrics.SandboxFailuresTotal.WithLabelValues("init").Inc()
 		log.Error().Err(err).Msg("box init failed")
 		return fmt.Errorf("failed to init box %d: %w", boxID, err)
 	}
+	initSpan.End()
 	log.Info().Str("box_dir", boxDir).Msg("sandbox ready")
 	defer e.cleanupBox(&log, boxID)
 
@@ -132,10 +161,14 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 		log.Info().Str("compile_cmd", lang.CompileCommand.String).Msg("compiling")
 		e.updateStatus(ctx, &log, submissionID, "compiling")
 
+		_, compileSpan := telemetry.Tracer("execution").Start(ctx, "sandbox.compile")
 		compileStart := time.Now()
 		compileMeta, compileOutput, err := e.compile(&log, boxID, lang.CompileCommand.String, metaFile, sub)
 		metrics.JobDuration.WithLabelValues("compile", lang.Name).Observe(time.Since(compileStart).Seconds())
 		if err != nil {
+			compileSpan.RecordError(err)
+			compileSpan.SetStatus(codes.Error, "compile failed")
+			compileSpan.End()
 			metrics.SandboxFailuresTotal.WithLabelValues("compile").Inc()
 			log.Error().Err(err).Msg("compile step failed")
 			return fmt.Errorf("compilation error in box %d: %w", boxID, err)
@@ -150,14 +183,19 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 			Msg("compile done")
 
 		if compileMeta.Status != "" || compileMeta.ExitCode != 0 {
+			compileSpan.SetAttributes(attribute.String("result", "compilation_error"))
+			compileSpan.End()
 			finishedAt := time.Now()
 			log.Warn().Msg("compilation error, completing submission")
 			e.completeSubmission(ctx, &log, sub.ID, "compilation_error", compileOutput, "", "", compileMeta, startedAt, finishedAt)
+			span.SetAttributes(attribute.String("status", "compilation_error"))
 			metrics.JobsProcessedTotal.WithLabelValues("compilation_error", lang.Name).Inc()
 			metrics.JobDuration.WithLabelValues("total", lang.Name).Observe(time.Since(startTime).Seconds())
 			return nil
 		}
 
+		compileSpan.SetAttributes(attribute.String("result", "success"))
+		compileSpan.End()
 		log.Info().Msg("compilation succeeded, resetting metadata")
 		os.Remove(metaFile)
 	}
@@ -166,14 +204,19 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 	log.Info().Str("run_cmd", lang.RunCommand).Msg("running")
 	e.updateStatus(ctx, &log, submissionID, "running")
 
+	_, runSpan := telemetry.Tracer("execution").Start(ctx, "sandbox.run")
 	runStart := time.Now()
 	runMeta, err := e.run(&log, boxID, lang.RunCommand, metaFile, sub)
 	metrics.JobDuration.WithLabelValues("run", lang.Name).Observe(time.Since(runStart).Seconds())
 	if err != nil {
+		runSpan.RecordError(err)
+		runSpan.SetStatus(codes.Error, "run failed")
+		runSpan.End()
 		metrics.SandboxFailuresTotal.WithLabelValues("run").Inc()
 		log.Error().Err(err).Msg("run step failed")
 		return fmt.Errorf("run error in box %d: %w", boxID, err)
 	}
+	runSpan.End()
 
 	finishedAt := time.Now()
 
@@ -201,6 +244,15 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 		Float64("total_duration_s", finishedAt.Sub(startedAt).Seconds()).
 		Msg("completing submission")
 	e.completeSubmission(ctx, &log, sub.ID, status, "", string(stdout), string(stderr), runMeta, startedAt, finishedAt)
+
+	span.SetAttributes(
+		attribute.String("status", status),
+		attribute.Int("stdout_bytes", len(stdout)),
+		attribute.Int("stderr_bytes", len(stderr)),
+		attribute.Float64("time_s", runMeta.Time),
+		attribute.Float64("wall_time_s", runMeta.WallTime),
+		attribute.Int64("memory_kb", int64(runMeta.Memory)),
+	)
 
 	metrics.JobsProcessedTotal.WithLabelValues(status, lang.Name).Inc()
 	metrics.JobDuration.WithLabelValues("total", lang.Name).Observe(time.Since(startTime).Seconds())

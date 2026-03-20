@@ -12,6 +12,12 @@ type Config struct {
 	Database DatabaseConfig `env-prefix:"DATABASE_"`
 	Redis    RedisConfig    `env-prefix:"REDIS_"`
 	Worker   WorkerConfig   `env-prefix:"WORKER_"`
+	OTel     OTelConfig     `env-prefix:"OTEL_"`
+}
+
+type OTelConfig struct {
+	Endpoint    string `env:"ENDPOINT"`
+	ServiceName string `env:"SERVICE_NAME"`
 }
 
 type WorkerConfig struct {
@@ -53,7 +59,11 @@ func LoadConfig() (*Config, error) {
 
 	err := cleanenv.ReadConfig(".env", &cfg)
 	if err != nil {
-		return nil, fmt.Errorf("could not load env variables: %w", err)
+		// Fall back to reading from environment variables only (e.g. in Docker)
+		err = cleanenv.ReadEnv(&cfg)
+		if err != nil {
+			return nil, fmt.Errorf("could not load env variables: %w", err)
+		}
 	}
 
 	return &cfg, nil

@@ -18,6 +18,7 @@ import (
 	"github.com/aarctanz/Exec0/internal/queue"
 	"github.com/aarctanz/Exec0/internal/server"
 	"github.com/aarctanz/Exec0/internal/services"
+	"github.com/aarctanz/Exec0/internal/telemetry"
 )
 
 const DefaultContextTimeout = 30
@@ -30,6 +31,22 @@ func main() {
 
 	logger.Init(cfg.Primary.Env)
 	metrics.RegisterAPI(prometheus.DefaultRegisterer)
+
+	// OpenTelemetry tracing
+	otelEndpoint := cfg.OTel.Endpoint
+	if otelEndpoint == "" {
+		otelEndpoint = "localhost:4317"
+	}
+	otelServiceName := cfg.OTel.ServiceName
+	if otelServiceName == "" {
+		otelServiceName = "exec0-api"
+	}
+	shutdownTracer, err := telemetry.Init(context.Background(), otelServiceName, otelEndpoint)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to init OTel tracing, continuing without it")
+	} else {
+		defer shutdownTracer(context.Background())
+	}
 
 	srv, err := server.New(cfg)
 	if err != nil {

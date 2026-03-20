@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+
 	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/aarctanz/Exec0/internal/metrics"
 	"github.com/aarctanz/Exec0/internal/models/submissions"
 	"github.com/aarctanz/Exec0/internal/queue"
+	"github.com/aarctanz/Exec0/internal/telemetry"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -30,7 +33,10 @@ func NewSubmissionsService(queries *queries.Queries, languageService *LanguagesS
 	}
 }
 
-func (s *SubmissionsService) ListSubmissions(page, perPage int32) ([]queries.Submission, error) {
+func (s *SubmissionsService) ListSubmissions(ctx context.Context, page, perPage int32) ([]queries.Submission, error) {
+	ctx, span := telemetry.Tracer("submissions").Start(ctx, "ListSubmissions")
+	defer span.End()
+
 	if page < 1 {
 		page = 1
 	}
@@ -41,28 +47,39 @@ func (s *SubmissionsService) ListSubmissions(page, perPage int32) ([]queries.Sub
 		perPage = 100
 	}
 	offset := (page - 1) * perPage
-	subs, err := s.queries.ListSubmissions(context.Background(), queries.ListSubmissionsParams{
+	subs, err := s.queries.ListSubmissions(ctx, queries.ListSubmissionsParams{
 		Limit:  perPage,
 		Offset: offset,
 	})
 	if err != nil {
+		span.RecordError(err)
 		return nil, err
 	}
 	if subs == nil {
 		subs = []queries.Submission{}
 	}
+	span.SetAttributes(attribute.Int("result_count", len(subs)))
 	return subs, nil
 }
 
-func (s *SubmissionsService) GetSubmissionById(submissionID int) (queries.Submission, error) {
-	sub, err := s.queries.GetSubmissionByID(context.Background(), int64(submissionID))
+func (s *SubmissionsService) GetSubmissionById(ctx context.Context, submissionID int) (queries.Submission, error) {
+	ctx, span := telemetry.Tracer("submissions").Start(ctx, "GetSubmissionById")
+	defer span.End()
+	span.SetAttributes(attribute.Int("submission_id", submissionID))
+
+	sub, err := s.queries.GetSubmissionByID(ctx, int64(submissionID))
 	if err != nil {
+		span.RecordError(err)
 		return queries.Submission{}, err
 	}
 	return sub, nil
 }
 
-func (s *SubmissionsService) CreateSubmission(dto submissions.CreateSubmissionDTO) (int64, error) {
+func (s *SubmissionsService) CreateSubmission(ctx context.Context, dto submissions.CreateSubmissionDTO) (int64, error) {
+	ctx, span := telemetry.Tracer("submissions").Start(ctx, "CreateSubmission")
+	defer span.End()
+	span.SetAttributes(attribute.Int64("language_id", dto.LanguageID))
+
 	if dto.LanguageID == 0 {
 		return 0, errors.New("language_id is required")
 	}
@@ -116,7 +133,7 @@ func (s *SubmissionsService) CreateSubmission(dto submissions.CreateSubmissionDT
 	}
 
 	dbStart := time.Now()
-	sub, err := s.queries.CreateSubmission(context.Background(), params)
+	sub, err := s.queries.CreateSubmission(ctx, params)
 	metrics.DBOperationDuration.WithLabelValues("create_submission").Observe(time.Since(dbStart).Seconds())
 	if err != nil {
 		metrics.DBFailuresTotal.WithLabelValues("create_submission").Inc()
@@ -125,12 +142,12 @@ func (s *SubmissionsService) CreateSubmission(dto submissions.CreateSubmissionDT
 
 	// Resolve language name for metric label
 	langName := "unknown"
-	if lang, err := s.languagesService.GetLanguageByID(dto.LanguageID); err == nil {
+	if lang, err := s.languagesService.GetLanguageByID(ctx, dto.LanguageID); err == nil {
 		langName = lang.Name
 	}
 	metrics.SubmissionsCreatedTotal.WithLabelValues(langName).Inc()
 
-	if err := s.queueClient.EnqueueSubmission(sub.ID); err != nil {
+	if err := s.queueClient.EnqueueSubmission(ctx, sub.ID); err != nil {
 		metrics.EnqueueFailuresTotal.Inc()
 		return 0, fmt.Errorf("failed to enqueue submission: %w", err)
 	}
@@ -165,14 +182,14 @@ func boolOrDefault(val *bool, def bool) bool {
 	return *val
 }
 
-func (s *SubmissionsService) CompleteSubmission(arg queries.CompleteSubmissionParams) {
-	s.queries.CompleteSubmission(context.Background(), arg)
+func (s *SubmissionsService) CompleteSubmission(ctx context.Context, arg queries.CompleteSubmissionParams) {
+	s.queries.CompleteSubmission(ctx, arg)
 }
 
-func (s *SubmissionsService) UpdateSubmissionStatus(submissionID int, status string) {
+func (s *SubmissionsService) UpdateSubmissionStatus(ctx context.Context, submissionID int, status string) {
 	arg := queries.UpdateSubmissionStatusParams{
 		ID:     int64(submissionID),
 		Status: status,
 	}
-	s.queries.UpdateSubmissionStatus(context.Background(), arg)
+	s.queries.UpdateSubmissionStatus(ctx, arg)
 }

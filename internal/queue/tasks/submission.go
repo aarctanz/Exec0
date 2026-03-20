@@ -12,16 +12,19 @@ import (
 // registered under this name.
 const TypeSubmissionExecute = "submission:execute"
 
-// SubmissionPayload carries only the submission ID.
-// The worker fetches the full submission from the DB rather than
-// serializing source code into Redis.
+// SubmissionPayload carries the submission ID and trace context for
+// distributed tracing propagation through the queue.
 type SubmissionPayload struct {
-	SubmissionID int64 `json:"submission_id"`
+	SubmissionID int64             `json:"submission_id"`
+	TraceCarrier map[string]string `json:"trace_carrier,omitempty"`
 }
 
 // NewSubmissionTask creates an asynq.Task ready to be enqueued.
-func NewSubmissionTask(submissionID int64) (*asynq.Task, error) {
-	payload, err := json.Marshal(SubmissionPayload{SubmissionID: submissionID})
+func NewSubmissionTask(submissionID int64, traceCarrier map[string]string) (*asynq.Task, error) {
+	payload, err := json.Marshal(SubmissionPayload{
+		SubmissionID: submissionID,
+		TraceCarrier: traceCarrier,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal submission payload: %w", err)
 	}

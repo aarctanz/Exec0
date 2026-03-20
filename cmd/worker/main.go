@@ -13,6 +13,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/aarctanz/Exec0/internal/database"
@@ -22,6 +24,7 @@ import (
 	"github.com/aarctanz/Exec0/internal/queue"
 	"github.com/aarctanz/Exec0/internal/queue/tasks"
 	"github.com/aarctanz/Exec0/internal/services"
+	"github.com/aarctanz/Exec0/internal/telemetry"
 	"github.com/hibiken/asynq"
 )
 
@@ -46,6 +49,22 @@ func main() {
 	logger.Init(cfg.Primary.Env)
 	metrics.RegisterWorker(prometheus.DefaultRegisterer)
 
+	// OpenTelemetry tracing
+	otelEndpoint := cfg.OTel.Endpoint
+	if otelEndpoint == "" {
+		otelEndpoint = "localhost:4317"
+	}
+	otelServiceName := cfg.OTel.ServiceName
+	if otelServiceName == "" {
+		otelServiceName = "exec0-worker"
+	}
+	shutdownTracer, err := telemetry.Init(context.Background(), otelServiceName, otelEndpoint)
+	if err != nil {
+		log.Warn().Err(err).Msg("failed to init OTel tracing, continuing without it")
+	} else {
+		defer shutdownTracer(context.Background())
+	}
+
 	db, err := database.New(cfg)
 	if err != nil {
 		log.Fatal().Err(err).Msg("failed to connect to database")
@@ -60,6 +79,12 @@ func main() {
 		if err := json.Unmarshal(t.Payload(), &payload); err != nil {
 			return fmt.Errorf("failed to unmarshal submission payload: %w", err)
 		}
+
+		// Extract trace context propagated through the queue
+		if len(payload.TraceCarrier) > 0 {
+			ctx = otel.GetTextMapPropagator().Extract(ctx, propagation.MapCarrier(payload.TraceCarrier))
+		}
+
 		return executionService.Execute(ctx, payload.SubmissionID)
 	}
 

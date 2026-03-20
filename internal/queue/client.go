@@ -1,7 +1,11 @@
 package queue
 
 import (
+	"context"
 	"fmt"
+
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/propagation"
 
 	"github.com/aarctanz/Exec0/internal/queue/tasks"
 	"github.com/hibiken/asynq"
@@ -16,8 +20,12 @@ func NewClient(redisAddr string) *Client {
 	return &Client{client: client}
 }
 
-func (c *Client) EnqueueSubmission(submissionID int64) error {
-	task, err := tasks.NewSubmissionTask(submissionID)
+func (c *Client) EnqueueSubmission(ctx context.Context, submissionID int64) error {
+	// Extract trace context into a carrier map for propagation through Redis
+	carrier := make(propagation.MapCarrier)
+	otel.GetTextMapPropagator().Inject(ctx, carrier)
+
+	task, err := tasks.NewSubmissionTask(submissionID, carrier)
 	if err != nil {
 		return fmt.Errorf("failed to create submission task: %w", err)
 	}

@@ -22,7 +22,7 @@ func (h *SubmissionsHandler) List(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
 
-	subs, err := h.service.ListSubmissions(int32(page), int32(perPage))
+	subs, err := h.service.ListSubmissions(r.Context(), int32(page), int32(perPage))
 	if err != nil {
 		util.Error(w, http.StatusInternalServerError, "failed to fetch submissions")
 		return
@@ -37,7 +37,7 @@ func (h *SubmissionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id, err := h.service.CreateSubmission(dto)
+	id, err := h.service.CreateSubmission(r.Context(), dto)
 	if err != nil {
 		util.Error(w, http.StatusUnprocessableEntity, err.Error())
 		return
@@ -53,7 +53,7 @@ func (h *SubmissionsHandler) Get(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sub, err := h.service.GetSubmissionById(id)
+	sub, err := h.service.GetSubmissionById(r.Context(), id)
 	if err != nil {
 		util.Error(w, http.StatusNotFound, "submission not found")
 		return

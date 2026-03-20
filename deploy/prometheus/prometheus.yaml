@@ -1,0 +1,12 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: exec0-api
+    static_configs:
+      - targets: ["exec0-api:8080"]
+
+  - job_name: exec0-worker
+    static_configs:
+      - targets: ["exec0-worker:9091"]

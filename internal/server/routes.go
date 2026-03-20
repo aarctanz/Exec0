@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
 	"github.com/aarctanz/Exec0/internal/handlers"
 	"github.com/aarctanz/Exec0/internal/middleware"
@@ -33,10 +34,11 @@ func SetupRoutes(svc *services.Services, corsOrigins []string, redisAddr string)
 	// Prometheus metrics
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	// Middleware chain: recovery → metrics → logging → CORS → router
+	// Middleware chain: recovery → metrics → otelhttp → logging → CORS → router
 	var handler http.Handler = mux
 	handler = middleware.CORS(corsOrigins)(handler)
 	handler = middleware.Logging(handler)
+	handler = otelhttp.NewHandler(handler, "http.request")
 	handler = middleware.Metrics(handler)
 	handler = middleware.Recovery(handler)
 
