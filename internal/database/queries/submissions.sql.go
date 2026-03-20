@@ -16,32 +16,24 @@ UPDATE submissions
 SET
     status = $2,
     compile_output = $3,
-    stdout = $4,
-    stderr = $5,
-    message = $6,
-    internal_error = $7,
-    exit_code = $8,
-    exit_signal = $9,
-    time = $10,
-    wall_time = $11,
-    memory = $12,
-    started_at = $13,
-    finished_at = $14,
+    message = $4,
+    internal_error = $5,
+    time = $6,
+    wall_time = $7,
+    memory = $8,
+    started_at = $9,
+    finished_at = $10,
     updated_at = NOW()
 WHERE id = $1
-RETURNING id, language_id, source_code, stdin, status, compile_output, stdout, stderr, message, internal_error, exit_code, exit_signal, cpu_time_limit, cpu_extra_time, wall_time_limit, memory_limit, stack_limit, max_processes_and_or_threads, enable_per_process_and_thread_time_limit, enable_per_process_and_thread_memory_limit, max_file_size, number_of_runs, redirect_stderr_to_stdout, enable_network, time, wall_time, memory, started_at, finished_at, created_at, updated_at
+RETURNING id, language_id, source_code, status, compile_output, message, internal_error, cpu_time_limit, cpu_extra_time, wall_time_limit, memory_limit, stack_limit, max_processes_and_or_threads, enable_per_process_and_thread_time_limit, enable_per_process_and_thread_memory_limit, max_file_size, number_of_runs, redirect_stderr_to_stdout, enable_network, time, wall_time, memory, started_at, finished_at, created_at, updated_at, mode
 `
 
 type CompleteSubmissionParams struct {
 	ID            int64              `db:"id" json:"id"`
 	Status        string             `db:"status" json:"status"`
 	CompileOutput pgtype.Text        `db:"compile_output" json:"compile_output"`
-	Stdout        pgtype.Text        `db:"stdout" json:"stdout"`
-	Stderr        pgtype.Text        `db:"stderr" json:"stderr"`
 	Message       pgtype.Text        `db:"message" json:"message"`
 	InternalError pgtype.Text        `db:"internal_error" json:"internal_error"`
-	ExitCode      pgtype.Int4        `db:"exit_code" json:"exit_code"`
-	ExitSignal    pgtype.Int4        `db:"exit_signal" json:"exit_signal"`
 	Time          pgtype.Float8      `db:"time" json:"time"`
 	WallTime      pgtype.Float8      `db:"wall_time" json:"wall_time"`
 	Memory        pgtype.Int4        `db:"memory" json:"memory"`
@@ -54,12 +46,8 @@ func (q *Queries) CompleteSubmission(ctx context.Context, arg CompleteSubmission
 		arg.ID,
 		arg.Status,
 		arg.CompileOutput,
-		arg.Stdout,
-		arg.Stderr,
 		arg.Message,
 		arg.InternalError,
-		arg.ExitCode,
-		arg.ExitSignal,
 		arg.Time,
 		arg.WallTime,
 		arg.Memory,
@@ -71,15 +59,10 @@ func (q *Queries) CompleteSubmission(ctx context.Context, arg CompleteSubmission
 		&i.ID,
 		&i.LanguageID,
 		&i.SourceCode,
-		&i.Stdin,
 		&i.Status,
 		&i.CompileOutput,
-		&i.Stdout,
-		&i.Stderr,
 		&i.Message,
 		&i.InternalError,
-		&i.ExitCode,
-		&i.ExitSignal,
 		&i.CpuTimeLimit,
 		&i.CpuExtraTime,
 		&i.WallTimeLimit,
@@ -99,6 +82,7 @@ func (q *Queries) CompleteSubmission(ctx context.Context, arg CompleteSubmission
 		&i.FinishedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Mode,
 	)
 	return i, err
 }
@@ -107,7 +91,7 @@ const createSubmission = `-- name: CreateSubmission :one
 INSERT INTO submissions (
     language_id,
     source_code,
-    stdin,
+    mode,
     cpu_time_limit,
     cpu_extra_time,
     wall_time_limit,
@@ -124,31 +108,31 @@ INSERT INTO submissions (
     $5, $6, $7, $8, $9, $10,
     $11, $12, $13, $14
 )
-RETURNING id, language_id, source_code, stdin, status, compile_output, stdout, stderr, message, internal_error, exit_code, exit_signal, cpu_time_limit, cpu_extra_time, wall_time_limit, memory_limit, stack_limit, max_processes_and_or_threads, enable_per_process_and_thread_time_limit, enable_per_process_and_thread_memory_limit, max_file_size, number_of_runs, redirect_stderr_to_stdout, enable_network, time, wall_time, memory, started_at, finished_at, created_at, updated_at
+RETURNING id, language_id, source_code, status, compile_output, message, internal_error, cpu_time_limit, cpu_extra_time, wall_time_limit, memory_limit, stack_limit, max_processes_and_or_threads, enable_per_process_and_thread_time_limit, enable_per_process_and_thread_memory_limit, max_file_size, number_of_runs, redirect_stderr_to_stdout, enable_network, time, wall_time, memory, started_at, finished_at, created_at, updated_at, mode
 `
 
 type CreateSubmissionParams struct {
-	LanguageID                           int64       `db:"language_id" json:"language_id"`
-	SourceCode                           string      `db:"source_code" json:"source_code"`
-	Stdin                                pgtype.Text `db:"stdin" json:"stdin"`
-	CpuTimeLimit                         float64     `db:"cpu_time_limit" json:"cpu_time_limit"`
-	CpuExtraTime                         float64     `db:"cpu_extra_time" json:"cpu_extra_time"`
-	WallTimeLimit                        float64     `db:"wall_time_limit" json:"wall_time_limit"`
-	MemoryLimit                          int32       `db:"memory_limit" json:"memory_limit"`
-	StackLimit                           int32       `db:"stack_limit" json:"stack_limit"`
-	MaxProcessesAndOrThreads             int32       `db:"max_processes_and_or_threads" json:"max_processes_and_or_threads"`
-	EnablePerProcessAndThreadTimeLimit   bool        `db:"enable_per_process_and_thread_time_limit" json:"enable_per_process_and_thread_time_limit"`
-	EnablePerProcessAndThreadMemoryLimit bool        `db:"enable_per_process_and_thread_memory_limit" json:"enable_per_process_and_thread_memory_limit"`
-	MaxFileSize                          int32       `db:"max_file_size" json:"max_file_size"`
-	RedirectStderrToStdout               bool        `db:"redirect_stderr_to_stdout" json:"redirect_stderr_to_stdout"`
-	EnableNetwork                        bool        `db:"enable_network" json:"enable_network"`
+	LanguageID                           int64   `db:"language_id" json:"language_id"`
+	SourceCode                           string  `db:"source_code" json:"source_code"`
+	Mode                                 string  `db:"mode" json:"mode"`
+	CpuTimeLimit                         float64 `db:"cpu_time_limit" json:"cpu_time_limit"`
+	CpuExtraTime                         float64 `db:"cpu_extra_time" json:"cpu_extra_time"`
+	WallTimeLimit                        float64 `db:"wall_time_limit" json:"wall_time_limit"`
+	MemoryLimit                          int32   `db:"memory_limit" json:"memory_limit"`
+	StackLimit                           int32   `db:"stack_limit" json:"stack_limit"`
+	MaxProcessesAndOrThreads             int32   `db:"max_processes_and_or_threads" json:"max_processes_and_or_threads"`
+	EnablePerProcessAndThreadTimeLimit   bool    `db:"enable_per_process_and_thread_time_limit" json:"enable_per_process_and_thread_time_limit"`
+	EnablePerProcessAndThreadMemoryLimit bool    `db:"enable_per_process_and_thread_memory_limit" json:"enable_per_process_and_thread_memory_limit"`
+	MaxFileSize                          int32   `db:"max_file_size" json:"max_file_size"`
+	RedirectStderrToStdout               bool    `db:"redirect_stderr_to_stdout" json:"redirect_stderr_to_stdout"`
+	EnableNetwork                        bool    `db:"enable_network" json:"enable_network"`
 }
 
 func (q *Queries) CreateSubmission(ctx context.Context, arg CreateSubmissionParams) (Submission, error) {
 	row := q.db.QueryRow(ctx, createSubmission,
 		arg.LanguageID,
 		arg.SourceCode,
-		arg.Stdin,
+		arg.Mode,
 		arg.CpuTimeLimit,
 		arg.CpuExtraTime,
 		arg.WallTimeLimit,
@@ -166,15 +150,10 @@ func (q *Queries) CreateSubmission(ctx context.Context, arg CreateSubmissionPara
 		&i.ID,
 		&i.LanguageID,
 		&i.SourceCode,
-		&i.Stdin,
 		&i.Status,
 		&i.CompileOutput,
-		&i.Stdout,
-		&i.Stderr,
 		&i.Message,
 		&i.InternalError,
-		&i.ExitCode,
-		&i.ExitSignal,
 		&i.CpuTimeLimit,
 		&i.CpuExtraTime,
 		&i.WallTimeLimit,
@@ -194,12 +173,13 @@ func (q *Queries) CreateSubmission(ctx context.Context, arg CreateSubmissionPara
 		&i.FinishedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Mode,
 	)
 	return i, err
 }
 
 const getSubmissionByID = `-- name: GetSubmissionByID :one
-SELECT id, language_id, source_code, stdin, status, compile_output, stdout, stderr, message, internal_error, exit_code, exit_signal, cpu_time_limit, cpu_extra_time, wall_time_limit, memory_limit, stack_limit, max_processes_and_or_threads, enable_per_process_and_thread_time_limit, enable_per_process_and_thread_memory_limit, max_file_size, number_of_runs, redirect_stderr_to_stdout, enable_network, time, wall_time, memory, started_at, finished_at, created_at, updated_at FROM submissions
+SELECT id, language_id, source_code, status, compile_output, message, internal_error, cpu_time_limit, cpu_extra_time, wall_time_limit, memory_limit, stack_limit, max_processes_and_or_threads, enable_per_process_and_thread_time_limit, enable_per_process_and_thread_memory_limit, max_file_size, number_of_runs, redirect_stderr_to_stdout, enable_network, time, wall_time, memory, started_at, finished_at, created_at, updated_at, mode FROM submissions
 WHERE id = $1
 LIMIT 1
 `
@@ -211,15 +191,10 @@ func (q *Queries) GetSubmissionByID(ctx context.Context, id int64) (Submission, 
 		&i.ID,
 		&i.LanguageID,
 		&i.SourceCode,
-		&i.Stdin,
 		&i.Status,
 		&i.CompileOutput,
-		&i.Stdout,
-		&i.Stderr,
 		&i.Message,
 		&i.InternalError,
-		&i.ExitCode,
-		&i.ExitSignal,
 		&i.CpuTimeLimit,
 		&i.CpuExtraTime,
 		&i.WallTimeLimit,
@@ -239,12 +214,13 @@ func (q *Queries) GetSubmissionByID(ctx context.Context, id int64) (Submission, 
 		&i.FinishedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.Mode,
 	)
 	return i, err
 }
 
 const listSubmissions = `-- name: ListSubmissions :many
-SELECT id, language_id, source_code, stdin, status, compile_output, stdout, stderr, message, internal_error, exit_code, exit_signal, cpu_time_limit, cpu_extra_time, wall_time_limit, memory_limit, stack_limit, max_processes_and_or_threads, enable_per_process_and_thread_time_limit, enable_per_process_and_thread_memory_limit, max_file_size, number_of_runs, redirect_stderr_to_stdout, enable_network, time, wall_time, memory, started_at, finished_at, created_at, updated_at FROM submissions
+SELECT id, language_id, source_code, status, compile_output, message, internal_error, cpu_time_limit, cpu_extra_time, wall_time_limit, memory_limit, stack_limit, max_processes_and_or_threads, enable_per_process_and_thread_time_limit, enable_per_process_and_thread_memory_limit, max_file_size, number_of_runs, redirect_stderr_to_stdout, enable_network, time, wall_time, memory, started_at, finished_at, created_at, updated_at, mode FROM submissions
 ORDER BY created_at DESC
 LIMIT $1 OFFSET $2
 `
@@ -267,15 +243,10 @@ func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams
 			&i.ID,
 			&i.LanguageID,
 			&i.SourceCode,
-			&i.Stdin,
 			&i.Status,
 			&i.CompileOutput,
-			&i.Stdout,
-			&i.Stderr,
 			&i.Message,
 			&i.InternalError,
-			&i.ExitCode,
-			&i.ExitSignal,
 			&i.CpuTimeLimit,
 			&i.CpuExtraTime,
 			&i.WallTimeLimit,
@@ -295,6 +266,7 @@ func (q *Queries) ListSubmissions(ctx context.Context, arg ListSubmissionsParams
 			&i.FinishedAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.Mode,
 		); err != nil {
 			return nil, err
 		}

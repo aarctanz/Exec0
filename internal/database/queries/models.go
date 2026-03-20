@@ -24,15 +24,10 @@ type Submission struct {
 	ID                                   int64              `db:"id" json:"id"`
 	LanguageID                           int64              `db:"language_id" json:"language_id"`
 	SourceCode                           string             `db:"source_code" json:"source_code"`
-	Stdin                                pgtype.Text        `db:"stdin" json:"stdin"`
 	Status                               string             `db:"status" json:"status"`
 	CompileOutput                        pgtype.Text        `db:"compile_output" json:"compile_output"`
-	Stdout                               pgtype.Text        `db:"stdout" json:"stdout"`
-	Stderr                               pgtype.Text        `db:"stderr" json:"stderr"`
 	Message                              pgtype.Text        `db:"message" json:"message"`
 	InternalError                        pgtype.Text        `db:"internal_error" json:"internal_error"`
-	ExitCode                             pgtype.Int4        `db:"exit_code" json:"exit_code"`
-	ExitSignal                           pgtype.Int4        `db:"exit_signal" json:"exit_signal"`
 	CpuTimeLimit                         float64            `db:"cpu_time_limit" json:"cpu_time_limit"`
 	CpuExtraTime                         float64            `db:"cpu_extra_time" json:"cpu_extra_time"`
 	WallTimeLimit                        float64            `db:"wall_time_limit" json:"wall_time_limit"`
@@ -52,4 +47,22 @@ type Submission struct {
 	FinishedAt                           pgtype.Timestamptz `db:"finished_at" json:"finished_at"`
 	CreatedAt                            pgtype.Timestamptz `db:"created_at" json:"created_at"`
 	UpdatedAt                            pgtype.Timestamptz `db:"updated_at" json:"updated_at"`
+	Mode                                 string             `db:"mode" json:"mode"`
+}
+
+type TestCaseResult struct {
+	ID             int64              `db:"id" json:"id"`
+	SubmissionID   int64              `db:"submission_id" json:"submission_id"`
+	Position       int16              `db:"position" json:"position"`
+	Stdin          pgtype.Text        `db:"stdin" json:"stdin"`
+	ExpectedOutput pgtype.Text        `db:"expected_output" json:"expected_output"`
+	Stdout         pgtype.Text        `db:"stdout" json:"stdout"`
+	Stderr         pgtype.Text        `db:"stderr" json:"stderr"`
+	ExitCode       pgtype.Int4        `db:"exit_code" json:"exit_code"`
+	ExitSignal     pgtype.Int4        `db:"exit_signal" json:"exit_signal"`
+	Status         string             `db:"status" json:"status"`
+	Time           pgtype.Float8      `db:"time" json:"time"`
+	WallTime       pgtype.Float8      `db:"wall_time" json:"wall_time"`
+	Memory         pgtype.Int4        `db:"memory" json:"memory"`
+	CreatedAt      pgtype.Timestamptz `db:"created_at" json:"created_at"`
 }

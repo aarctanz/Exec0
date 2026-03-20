@@ -2,7 +2,7 @@
 INSERT INTO submissions (
     language_id,
     source_code,
-    stdin,
+    mode,
     cpu_time_limit,
     cpu_extra_time,
     wall_time_limit,
@@ -43,17 +43,13 @@ UPDATE submissions
 SET
     status = $2,
     compile_output = $3,
-    stdout = $4,
-    stderr = $5,
-    message = $6,
-    internal_error = $7,
-    exit_code = $8,
-    exit_signal = $9,
-    time = $10,
-    wall_time = $11,
-    memory = $12,
-    started_at = $13,
-    finished_at = $14,
+    message = $4,
+    internal_error = $5,
+    time = $6,
+    wall_time = $7,
+    memory = $8,
+    started_at = $9,
+    finished_at = $10,
     updated_at = NOW()
 WHERE id = $1
 RETURNING *;
