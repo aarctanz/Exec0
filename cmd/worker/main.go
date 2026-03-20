@@ -4,17 +4,21 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 	"runtime"
 	"syscall"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog/log"
 
 	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/aarctanz/Exec0/internal/database"
 	dbqueries "github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/aarctanz/Exec0/internal/logger"
+	"github.com/aarctanz/Exec0/internal/metrics"
 	"github.com/aarctanz/Exec0/internal/queue"
 	"github.com/aarctanz/Exec0/internal/queue/tasks"
 	"github.com/aarctanz/Exec0/internal/services"
@@ -40,6 +44,7 @@ func main() {
 	}
 
 	logger.Init(cfg.Primary.Env)
+	metrics.RegisterWorker(prometheus.DefaultRegisterer)
 
 	db, err := database.New(cfg)
 	if err != nil {
@@ -59,12 +64,29 @@ func main() {
 	}
 
 	concurrency := getConcurrency(cfg.Worker)
+	metrics.WorkerConcurrency.Set(float64(concurrency))
+
 	srv := queue.NewServer(cfg.Redis.Address, concurrency, queries)
 	mux := queue.NewServeMux(submissionHandler)
 
 	log.Info().Int("concurrency", concurrency).Msg("starting worker")
 
-	// Start server in a goroutine
+	// Metrics HTTP server
+	metricsPort := cfg.Worker.MetricsPort
+	if metricsPort == "" {
+		metricsPort = "9091"
+	}
+	metricsMux := http.NewServeMux()
+	metricsMux.Handle("/metrics", promhttp.Handler())
+	metricsServer := &http.Server{Addr: ":" + metricsPort, Handler: metricsMux}
+	go func() {
+		log.Info().Str("port", metricsPort).Msg("starting worker metrics server")
+		if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Error().Err(err).Msg("worker metrics server error")
+		}
+	}()
+
+	// Start asynq server in a goroutine
 	go func() {
 		if err := srv.Run(mux); err != nil {
 			log.Fatal().Err(err).Msg("failed to run worker")
@@ -78,5 +100,6 @@ func main() {
 
 	log.Info().Str("signal", sig.String()).Msg("shutting down worker, waiting for active tasks to finish")
 	srv.Shutdown()
+	metricsServer.Close()
 	log.Info().Msg("worker stopped")
 }

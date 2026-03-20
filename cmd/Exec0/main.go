@@ -8,11 +8,13 @@ import (
 	"os/signal"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/rs/zerolog/log"
 
 	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/aarctanz/Exec0/internal/logger"
+	"github.com/aarctanz/Exec0/internal/metrics"
 	"github.com/aarctanz/Exec0/internal/queue"
 	"github.com/aarctanz/Exec0/internal/server"
 	"github.com/aarctanz/Exec0/internal/services"
@@ -27,6 +29,7 @@ func main() {
 	}
 
 	logger.Init(cfg.Primary.Env)
+	metrics.RegisterAPI(prometheus.DefaultRegisterer)
 
 	srv, err := server.New(cfg)
 	if err != nil {

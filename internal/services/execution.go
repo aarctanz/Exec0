@@ -16,6 +16,7 @@ import (
 
 	"github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/aarctanz/Exec0/internal/logger"
+	"github.com/aarctanz/Exec0/internal/metrics"
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
@@ -56,14 +57,24 @@ type Metadata struct {
 // Execute is the main entry point called by the worker.
 func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) error {
 	startTime := time.Now()
+	metrics.WorkerActiveJobs.Inc()
+	defer metrics.WorkerActiveJobs.Dec()
+
 	log := logger.FromContext(ctx).With().Int64("submission_id", submissionID).Logger()
 	log.Info().Msg("starting execution")
 
+	dbStart := time.Now()
 	sub, err := e.queries.GetSubmissionByID(ctx, submissionID)
+	metrics.DBOperationDuration.WithLabelValues("get_submission").Observe(time.Since(dbStart).Seconds())
 	if err != nil {
+		metrics.DBFailuresTotal.WithLabelValues("get_submission").Inc()
 		log.Error().Err(err).Msg("failed to fetch submission")
 		return fmt.Errorf("failed to fetch submission %d: %w", submissionID, err)
 	}
+
+	// Queue wait time: time between creation and execution start
+	metrics.JobQueueWait.WithLabelValues("default").Observe(startTime.Sub(sub.CreatedAt.Time).Seconds())
+
 	log.Info().
 		Int64("language_id", sub.LanguageID).
 		Int32("memory_limit_kb", sub.MemoryLimit).
@@ -74,8 +85,11 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 		Bool("enable_network", sub.EnableNetwork).
 		Msg("submission fetched")
 
+	dbStart = time.Now()
 	lang, err := e.queries.GetLanguageByID(ctx, sub.LanguageID)
+	metrics.DBOperationDuration.WithLabelValues("get_language").Observe(time.Since(dbStart).Seconds())
 	if err != nil {
+		metrics.DBFailuresTotal.WithLabelValues("get_language").Inc()
 		log.Error().Err(err).Int64("language_id", sub.LanguageID).Msg("failed to fetch language")
 		return fmt.Errorf("failed to fetch language %d: %w", sub.LanguageID, err)
 	}
@@ -93,6 +107,7 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 	log.Info().Msg("initializing sandbox")
 	boxDir, err := e.initBox(&log, boxID)
 	if err != nil {
+		metrics.SandboxFailuresTotal.WithLabelValues("init").Inc()
 		log.Error().Err(err).Msg("box init failed")
 		return fmt.Errorf("failed to init box %d: %w", boxID, err)
 	}
@@ -117,8 +132,11 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 		log.Info().Str("compile_cmd", lang.CompileCommand.String).Msg("compiling")
 		e.updateStatus(ctx, &log, submissionID, "compiling")
 
+		compileStart := time.Now()
 		compileMeta, compileOutput, err := e.compile(&log, boxID, lang.CompileCommand.String, metaFile, sub)
+		metrics.JobDuration.WithLabelValues("compile", lang.Name).Observe(time.Since(compileStart).Seconds())
 		if err != nil {
+			metrics.SandboxFailuresTotal.WithLabelValues("compile").Inc()
 			log.Error().Err(err).Msg("compile step failed")
 			return fmt.Errorf("compilation error in box %d: %w", boxID, err)
 		}
@@ -135,6 +153,8 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 			finishedAt := time.Now()
 			log.Warn().Msg("compilation error, completing submission")
 			e.completeSubmission(ctx, &log, sub.ID, "compilation_error", compileOutput, "", "", compileMeta, startedAt, finishedAt)
+			metrics.JobsProcessedTotal.WithLabelValues("compilation_error", lang.Name).Inc()
+			metrics.JobDuration.WithLabelValues("total", lang.Name).Observe(time.Since(startTime).Seconds())
 			return nil
 		}
 
@@ -146,8 +166,11 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 	log.Info().Str("run_cmd", lang.RunCommand).Msg("running")
 	e.updateStatus(ctx, &log, submissionID, "running")
 
+	runStart := time.Now()
 	runMeta, err := e.run(&log, boxID, lang.RunCommand, metaFile, sub)
+	metrics.JobDuration.WithLabelValues("run", lang.Name).Observe(time.Since(runStart).Seconds())
 	if err != nil {
+		metrics.SandboxFailuresTotal.WithLabelValues("run").Inc()
 		log.Error().Err(err).Msg("run step failed")
 		return fmt.Errorf("run error in box %d: %w", boxID, err)
 	}
@@ -178,6 +201,10 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 		Float64("total_duration_s", finishedAt.Sub(startedAt).Seconds()).
 		Msg("completing submission")
 	e.completeSubmission(ctx, &log, sub.ID, status, "", string(stdout), string(stderr), runMeta, startedAt, finishedAt)
+
+	metrics.JobsProcessedTotal.WithLabelValues(status, lang.Name).Inc()
+	metrics.JobDuration.WithLabelValues("total", lang.Name).Observe(time.Since(startTime).Seconds())
+
 	log.Info().
 		Float64("execution_time_s", time.Since(startTime).Seconds()).
 		Msg("execution complete")

@@ -7,6 +7,7 @@ import (
 	"github.com/rs/zerolog/log"
 
 	"github.com/aarctanz/Exec0/internal/database/queries"
+	"github.com/aarctanz/Exec0/internal/metrics"
 	"github.com/aarctanz/Exec0/internal/queue/tasks"
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -19,6 +20,7 @@ func NewServer(redisAddr string, concurrency int, dbQueries *queries.Queries) *a
 			Concurrency:    concurrency,
 			RetryDelayFunc: asynq.DefaultRetryDelayFunc,
 			ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
+				metrics.JobRetriesTotal.WithLabelValues("execution_error").Inc()
 				retried, _ := asynq.GetRetryCount(ctx)
 				maxRetry, _ := asynq.GetMaxRetry(ctx)
 				if retried >= maxRetry {

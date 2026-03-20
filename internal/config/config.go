@@ -15,7 +15,8 @@ type Config struct {
 }
 
 type WorkerConfig struct {
-	Concurrency int `env:"CONCURRENCY"`
+	Concurrency int    `env:"CONCURRENCY"`
+	MetricsPort string `env:"METRICS_PORT"`
 }
 
 type PrimaryConfig struct {

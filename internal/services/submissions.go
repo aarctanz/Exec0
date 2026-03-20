@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/aarctanz/Exec0/internal/database/queries"
+	"github.com/aarctanz/Exec0/internal/metrics"
 	"github.com/aarctanz/Exec0/internal/models/submissions"
 	"github.com/aarctanz/Exec0/internal/queue"
 	"github.com/jackc/pgx/v5/pgtype"
@@ -113,12 +115,23 @@ func (s *SubmissionsService) CreateSubmission(dto submissions.CreateSubmissionDT
 		params.EnableNetwork = s.executionConfig.DefaultEnableNetwork
 	}
 
+	dbStart := time.Now()
 	sub, err := s.queries.CreateSubmission(context.Background(), params)
+	metrics.DBOperationDuration.WithLabelValues("create_submission").Observe(time.Since(dbStart).Seconds())
 	if err != nil {
+		metrics.DBFailuresTotal.WithLabelValues("create_submission").Inc()
 		return 0, err
 	}
 
+	// Resolve language name for metric label
+	langName := "unknown"
+	if lang, err := s.languagesService.GetLanguageByID(dto.LanguageID); err == nil {
+		langName = lang.Name
+	}
+	metrics.SubmissionsCreatedTotal.WithLabelValues(langName).Inc()
+
 	if err := s.queueClient.EnqueueSubmission(sub.ID); err != nil {
+		metrics.EnqueueFailuresTotal.Inc()
 		return 0, fmt.Errorf("failed to enqueue submission: %w", err)
 	}
 
