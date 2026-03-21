@@ -122,15 +122,34 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 		Bool("has_compile", lang.CompileCommand.Valid).
 		Msg("language resolved")
 
-	boxID := nextBoxID(submissionID)
+	// Fetch test case results for this submission
+	testCases, err := e.queries.GetTestCaseResultsBySubmissionID(ctx, submissionID)
+	if err != nil || len(testCases) == 0 {
+		span.RecordError(err)
+		log.Error().Err(err).Msg("failed to fetch test cases")
+		return fmt.Errorf("failed to fetch test cases for submission %d: %w", submissionID, err)
+	}
 
-	log = log.With().Int("box_id", boxID).Logger()
+	switch sub.Mode {
+	case "single":
+		return e.executeSingle(ctx, span, &log, sub, lang, testCases[0], startTime)
+	default:
+		return fmt.Errorf("unsupported mode: %s", sub.Mode)
+	}
+}
+
+func (e *ExecutionService) executeSingle(ctx context.Context, span trace.Span, log *zerolog.Logger, sub queries.Submission, lang queries.GetLanguageByIDRow, tc queries.TestCaseResult, startTime time.Time) error {
+	submissionID := sub.ID
+
+	boxID := nextBoxID(submissionID)
+	log2 := log.With().Int("box_id", boxID).Logger()
+	log = &log2
 
 	log.Info().Msg("initializing sandbox")
 	_, initSpan := telemetry.Tracer("execution").Start(ctx, "sandbox.init",
 		trace.WithAttributes(attribute.Int("box_id", boxID)),
 	)
-	boxDir, err := e.initBox(&log, boxID)
+	boxDir, err := e.initBox(log, boxID)
 	if err != nil {
 		initSpan.RecordError(err)
 		initSpan.SetStatus(codes.Error, "box init failed")
@@ -141,13 +160,14 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 	}
 	initSpan.End()
 	log.Info().Str("box_dir", boxDir).Msg("sandbox ready")
-	defer e.cleanupBox(&log, boxID)
+	defer e.cleanupBox(log, boxID)
 
+	stdin := tc.Stdin.String
 	log.Info().
 		Int("source_bytes", len(sub.SourceCode)).
-		Int("stdin_bytes", len(sub.Stdin.String)).
+		Int("stdin_bytes", len(stdin)).
 		Msg("writing files")
-	if err := e.createFiles(boxDir, sub.SourceCode, lang.SourceFile, sub.Stdin.String); err != nil {
+	if err := e.createFiles(boxDir, sub.SourceCode, lang.SourceFile, stdin); err != nil {
 		log.Error().Err(err).Msg("failed to create files")
 		return fmt.Errorf("failed to create files in box %d: %w", boxID, err)
 	}
@@ -159,11 +179,11 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 	// Compile if language has a compile command
 	if lang.CompileCommand.Valid {
 		log.Info().Str("compile_cmd", lang.CompileCommand.String).Msg("compiling")
-		e.updateStatus(ctx, &log, submissionID, "compiling")
+		e.updateStatus(ctx, log, submissionID, "compiling")
 
 		_, compileSpan := telemetry.Tracer("execution").Start(ctx, "sandbox.compile")
 		compileStart := time.Now()
-		compileMeta, compileOutput, err := e.compile(&log, boxID, lang.CompileCommand.String, metaFile, sub)
+		compileMeta, compileOutput, err := e.compile(log, boxID, lang.CompileCommand.String, metaFile, sub)
 		metrics.JobDuration.WithLabelValues("compile", lang.Name).Observe(time.Since(compileStart).Seconds())
 		if err != nil {
 			compileSpan.RecordError(err)
@@ -187,7 +207,8 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 			compileSpan.End()
 			finishedAt := time.Now()
 			log.Warn().Msg("compilation error, completing submission")
-			e.completeSubmission(ctx, &log, sub.ID, "compilation_error", compileOutput, "", "", compileMeta, startedAt, finishedAt)
+			e.completeSubmission(ctx, log, sub.ID, "compilation_error", compileOutput, compileMeta, startedAt, finishedAt)
+			e.updateTestCaseResult(ctx, log, tc.ID, "compilation_error", "", "", compileMeta)
 			span.SetAttributes(attribute.String("status", "compilation_error"))
 			metrics.JobsProcessedTotal.WithLabelValues("compilation_error", lang.Name).Inc()
 			metrics.JobDuration.WithLabelValues("total", lang.Name).Observe(time.Since(startTime).Seconds())
@@ -202,11 +223,11 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 
 	// Run
 	log.Info().Str("run_cmd", lang.RunCommand).Msg("running")
-	e.updateStatus(ctx, &log, submissionID, "running")
+	e.updateStatus(ctx, log, submissionID, "running")
 
 	_, runSpan := telemetry.Tracer("execution").Start(ctx, "sandbox.run")
 	runStart := time.Now()
-	runMeta, err := e.run(&log, boxID, lang.RunCommand, metaFile, sub)
+	runMeta, err := e.run(log, boxID, lang.RunCommand, metaFile, sub)
 	metrics.JobDuration.WithLabelValues("run", lang.Name).Observe(time.Since(runStart).Seconds())
 	if err != nil {
 		runSpan.RecordError(err)
@@ -234,16 +255,22 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 	stderr, _ := os.ReadFile(filepath.Join(boxDir, "box", "stderr.txt"))
 	log.Info().Int("stdout_bytes", len(stdout)).Int("stderr_bytes", len(stderr)).Msg("output read")
 
+	// Determine status
 	status := "accepted"
 	if runMeta.Status != "" {
 		status = e.mapIsolateStatus(runMeta.Status)
+	} else if tc.ExpectedOutput.Valid && strings.TrimSpace(string(stdout)) != strings.TrimSpace(tc.ExpectedOutput.String) {
+		status = "wrong_answer"
 	}
+
+	// Update test case result
+	e.updateTestCaseResult(ctx, log, tc.ID, status, string(stdout), string(stderr), runMeta)
 
 	log.Info().
 		Str("status", status).
 		Float64("total_duration_s", finishedAt.Sub(startedAt).Seconds()).
 		Msg("completing submission")
-	e.completeSubmission(ctx, &log, sub.ID, status, "", string(stdout), string(stderr), runMeta, startedAt, finishedAt)
+	e.completeSubmission(ctx, log, sub.ID, status, "", runMeta, startedAt, finishedAt)
 
 	span.SetAttributes(
 		attribute.String("status", status),
@@ -482,10 +509,9 @@ func (e *ExecutionService) updateStatus(ctx context.Context, log *zerolog.Logger
 }
 
 // completeSubmission writes final results back to the DB.
-func (e *ExecutionService) completeSubmission(ctx context.Context, log *zerolog.Logger, submissionID int64, status, compileOutput, stdout, stderr string, meta *Metadata, startedAt, finishedAt time.Time) {
+func (e *ExecutionService) completeSubmission(ctx context.Context, log *zerolog.Logger, submissionID int64, status, compileOutput string, meta *Metadata, startedAt, finishedAt time.Time) {
 	log.Info().
 		Str("status", status).
-		Int32("exit_code", meta.ExitCode).
 		Float64("time_s", meta.Time).
 		Int32("memory_kb", meta.Memory).
 		Msg("completing submission")
@@ -493,18 +519,32 @@ func (e *ExecutionService) completeSubmission(ctx context.Context, log *zerolog.
 		ID:            submissionID,
 		Status:        status,
 		CompileOutput: pgtype.Text{String: compileOutput, Valid: compileOutput != ""},
-		Stdout:        pgtype.Text{String: stdout, Valid: stdout != ""},
-		Stderr:        pgtype.Text{String: stderr, Valid: stderr != ""},
 		Message:       pgtype.Text{String: meta.Message, Valid: meta.Message != ""},
 		InternalError: pgtype.Text{},
-		ExitCode:      pgtype.Int4{Int32: meta.ExitCode, Valid: true},
-		ExitSignal:    pgtype.Int4{Int32: meta.ExitSignal, Valid: meta.ExitSignal != 0},
 		Time:          pgtype.Float8{Float64: meta.Time, Valid: true},
 		WallTime:      pgtype.Float8{Float64: meta.WallTime, Valid: true},
 		Memory:        pgtype.Int4{Int32: meta.Memory, Valid: true},
 		StartedAt:     pgtype.Timestamptz{Time: startedAt, Valid: true},
 		FinishedAt:    pgtype.Timestamptz{Time: finishedAt, Valid: true},
 	})
+}
+
+// updateTestCaseResult writes per-test-case execution results to the DB.
+func (e *ExecutionService) updateTestCaseResult(ctx context.Context, log *zerolog.Logger, tcID int64, status, stdout, stderr string, meta *Metadata) {
+	_, err := e.queries.UpdateTestCaseResult(ctx, queries.UpdateTestCaseResultParams{
+		ID:         tcID,
+		Stdout:     pgtype.Text{String: stdout, Valid: stdout != ""},
+		Stderr:     pgtype.Text{String: stderr, Valid: stderr != ""},
+		ExitCode:   pgtype.Int4{Int32: meta.ExitCode, Valid: true},
+		ExitSignal: pgtype.Int4{Int32: meta.ExitSignal, Valid: meta.ExitSignal != 0},
+		Status:     status,
+		Time:       pgtype.Float8{Float64: meta.Time, Valid: true},
+		WallTime:   pgtype.Float8{Float64: meta.WallTime, Valid: true},
+		Memory:     pgtype.Int4{Int32: meta.Memory, Valid: true},
+	})
+	if err != nil {
+		log.Error().Err(err).Int64("test_case_id", tcID).Msg("failed to update test case result")
+	}
 }
 
 // truncate shortens a string for log output.

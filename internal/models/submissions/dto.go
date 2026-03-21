@@ -4,6 +4,7 @@ type CreateSubmissionDTO struct {
 	LanguageID                           int64    `json:"language_id"`
 	SourceCode                           string   `json:"source_code"`
 	Stdin                                *string  `json:"stdin"`
+	ExpectedOutput                       *string  `json:"expected_output"`
 	CpuTimeLimit                         *float64 `json:"cpu_time_limit"`
 	WallTimeLimit                        *float64 `json:"wall_time_limit"`
 	MemoryLimit                          *int32   `json:"memory_limit"`

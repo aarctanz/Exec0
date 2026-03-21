@@ -36,6 +36,10 @@ services:
     ports:
       - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
     env_file: .env
+    environment:
+      DATABASE_HOST: postgres
+      REDIS_ADDRESS: redis:6379
+      OTEL_ENDPOINT: otel-collector:4317
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,6 +57,10 @@ services:
     ports:
       - "${WORKER_METRICS_PORT:-9091}:${WORKER_METRICS_PORT:-9091}"
     env_file: .env
+    environment:
+      DATABASE_HOST: postgres
+      REDIS_ADDRESS: redis:6379
+      OTEL_ENDPOINT: otel-collector:4317
     depends_on:
       postgres:
         condition: service_healthy

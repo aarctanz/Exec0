@@ -90,13 +90,7 @@ func (s *SubmissionsService) CreateSubmission(ctx context.Context, dto submissio
 	params := queries.CreateSubmissionParams{
 		LanguageID: dto.LanguageID,
 		SourceCode: dto.SourceCode,
-	}
-
-	// Stdin
-	if dto.Stdin == nil {
-		params.Stdin = pgtype.Text{String: "", Valid: true}
-	} else {
-		params.Stdin = pgtype.Text{String: *dto.Stdin, Valid: true}
+		Mode:       "single",
 	}
 
 	// CPU time limit
@@ -140,6 +134,25 @@ func (s *SubmissionsService) CreateSubmission(ctx context.Context, dto submissio
 		return 0, err
 	}
 
+	// Create single test case result
+	stdin := ""
+	if dto.Stdin != nil {
+		stdin = *dto.Stdin
+	}
+	expectedOutput := ""
+	if dto.ExpectedOutput != nil {
+		expectedOutput = *dto.ExpectedOutput
+	}
+	_, err = s.queries.CreateTestCaseResult(ctx, queries.CreateTestCaseResultParams{
+		SubmissionID:   sub.ID,
+		Position:       1,
+		Stdin:          pgtype.Text{String: stdin, Valid: true},
+		ExpectedOutput: pgtype.Text{String: expectedOutput, Valid: expectedOutput != ""},
+	})
+	if err != nil {
+		return 0, fmt.Errorf("failed to create test case result: %w", err)
+	}
+
 	// Resolve language name for metric label
 	langName := "unknown"
 	if lang, err := s.languagesService.GetLanguageByID(ctx, dto.LanguageID); err == nil {
@@ -180,6 +193,31 @@ func boolOrDefault(val *bool, def bool) bool {
 		return def
 	}
 	return *val
+}
+
+func (s *SubmissionsService) GetTestCaseResults(ctx context.Context, submissionID int64) ([]map[string]any, error) {
+	tcs, err := s.queries.GetTestCaseResultsBySubmissionID(ctx, submissionID)
+	if err != nil {
+		return nil, err
+	}
+	results := make([]map[string]any, len(tcs))
+	for i, tc := range tcs {
+		results[i] = map[string]any{
+			"id":              tc.ID,
+			"position":        tc.Position,
+			"stdin":           tc.Stdin.String,
+			"expected_output": tc.ExpectedOutput.String,
+			"stdout":          tc.Stdout.String,
+			"stderr":          tc.Stderr.String,
+			"exit_code":       tc.ExitCode.Int32,
+			"exit_signal":     tc.ExitSignal.Int32,
+			"status":          tc.Status,
+			"time":            tc.Time.Float64,
+			"wall_time":       tc.WallTime.Float64,
+			"memory":          tc.Memory.Int32,
+		}
+	}
+	return results, nil
 }
 
 func (s *SubmissionsService) CompleteSubmission(ctx context.Context, arg queries.CompleteSubmissionParams) {
