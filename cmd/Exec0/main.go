@@ -57,10 +57,11 @@ func main() {
 	defer queueClient.Close()
 
 	queries := queries.New(srv.DB.Pool)
-	svc := services.New(queries, queueClient)
+	svc := services.New(srv.DB.Pool, queries, queueClient)
 
-	handler := server.SetupRoutes(svc, cfg.Server.CORSAllowedOrigins, cfg.Redis.Address)
-	srv.SetupHTTPServer(handler)
+	routes := server.SetupRoutes(svc, cfg.Server.CORSAllowedOrigins, cfg.Redis.Address)
+	defer routes.Monitoring.Close()
+	srv.SetupHTTPServer(routes.Handler)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 

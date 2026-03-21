@@ -2,12 +2,18 @@ package handlers
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/aarctanz/Exec0/internal/models/submissions"
-	"github.com/aarctanz/Exec0/internal/util"
 	"github.com/aarctanz/Exec0/internal/services"
+	"github.com/aarctanz/Exec0/internal/util"
+)
+
+const (
+	MaxSourceCodeSize = 1 << 20 // 1MB
+	MaxBatchTestCases = 256
 )
 
 type SubmissionsHandler struct {
@@ -36,6 +42,10 @@ func (h *SubmissionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 		util.Error(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	if len(dto.SourceCode) > MaxSourceCodeSize {
+		util.Error(w, http.StatusBadRequest, fmt.Sprintf("source_code exceeds maximum size of %d bytes", MaxSourceCodeSize))
+		return
+	}
 
 	id, err := h.service.CreateSubmission(r.Context(), dto)
 	if err != nil {
@@ -50,6 +60,14 @@ func (h *SubmissionsHandler) CreateBatch(w http.ResponseWriter, r *http.Request)
 	var dto submissions.CreateBatchSubmissionDTO
 	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
 		util.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(dto.SourceCode) > MaxSourceCodeSize {
+		util.Error(w, http.StatusBadRequest, fmt.Sprintf("source_code exceeds maximum size of %d bytes", MaxSourceCodeSize))
+		return
+	}
+	if len(dto.TestCases) > MaxBatchTestCases {
+		util.Error(w, http.StatusBadRequest, fmt.Sprintf("test_cases exceeds maximum of %d", MaxBatchTestCases))
 		return
 	}
 

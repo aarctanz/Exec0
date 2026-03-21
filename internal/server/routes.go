@@ -11,7 +11,12 @@ import (
 	"github.com/aarctanz/Exec0/internal/services"
 )
 
-func SetupRoutes(svc *services.Services, corsOrigins []string, redisAddr string) http.Handler {
+type RouteResources struct {
+	Handler    http.Handler
+	Monitoring *handlers.MonitoringHandler
+}
+
+func SetupRoutes(svc *services.Services, corsOrigins []string, redisAddr string) *RouteResources {
 	mux := http.NewServeMux()
 
 	languages := handlers.NewLanguagesHandler(svc.LanguagesService)
@@ -43,5 +48,8 @@ func SetupRoutes(svc *services.Services, corsOrigins []string, redisAddr string)
 	handler = middleware.Metrics(handler)
 	handler = middleware.Recovery(handler)
 
-	return handler
+	return &RouteResources{
+		Handler:    handler,
+		Monitoring: monitoring,
+	}
 }

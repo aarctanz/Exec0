@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"go.opentelemetry.io/otel/attribute"
 
 	"github.com/aarctanz/Exec0/internal/config"
@@ -14,18 +16,19 @@ import (
 	"github.com/aarctanz/Exec0/internal/models/submissions"
 	"github.com/aarctanz/Exec0/internal/queue"
 	"github.com/aarctanz/Exec0/internal/telemetry"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type SubmissionsService struct {
+	pool             *pgxpool.Pool
 	queries          *queries.Queries
 	languagesService *LanguagesService
 	executionConfig  *config.ExecutionConfig
 	queueClient      *queue.Client
 }
 
-func NewSubmissionsService(queries *queries.Queries, languageService *LanguagesService, executionConfig *config.ExecutionConfig, queueClient *queue.Client) *SubmissionsService {
+func NewSubmissionsService(pool *pgxpool.Pool, queries *queries.Queries, languageService *LanguagesService, executionConfig *config.ExecutionConfig, queueClient *queue.Client) *SubmissionsService {
 	return &SubmissionsService{
+		pool:             pool,
 		queries:          queries,
 		languagesService: languageService,
 		executionConfig:  executionConfig,
@@ -87,47 +90,24 @@ func (s *SubmissionsService) CreateSubmission(ctx context.Context, dto submissio
 		return 0, errors.New("source_code is required")
 	}
 
-	params := queries.CreateSubmissionParams{
-		LanguageID: dto.LanguageID,
-		SourceCode: dto.SourceCode,
-		Mode:       "single",
+	params := s.buildSubmissionParams(dto.LanguageID, dto.SourceCode, "single",
+		dto.CpuTimeLimit, dto.WallTimeLimit, dto.MemoryLimit, dto.StackLimit,
+		dto.MaxProcessesAndOrThreads, dto.MaxFileSize,
+		dto.EnablePerProcessAndThreadTimeLimit, dto.EnablePerProcessAndThreadMemoryLimit,
+		dto.RedirectStderrToStdout, dto.EnableNetwork,
+	)
+
+	// Begin transaction
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	defer tx.Rollback(ctx)
 
-	// CPU time limit
-	params.CpuTimeLimit = valOrDefault(dto.CpuTimeLimit, s.executionConfig.DefaultCPUTime, s.executionConfig.MaxCPUTime)
-
-	// CPU extra time (not exposed in DTO, use default)
-	params.CpuExtraTime = s.executionConfig.DefaultCPUExtraTime
-
-	// Wall time limit
-	params.WallTimeLimit = valOrDefault(dto.WallTimeLimit, s.executionConfig.DefaultWallTime, s.executionConfig.MaxWallTime)
-
-	// Memory limit
-	params.MemoryLimit = valOrDefaultInt(dto.MemoryLimit, s.executionConfig.DefaultMemoryKB, s.executionConfig.MaxMemoryKB)
-
-	// Stack limit
-	params.StackLimit = valOrDefaultInt(dto.StackLimit, s.executionConfig.DefaultStackKB, s.executionConfig.MaxStackKB)
-
-	// Max processes/threads
-	params.MaxProcessesAndOrThreads = valOrDefaultInt(dto.MaxProcessesAndOrThreads, s.executionConfig.DefaultMaxProcessesAndThreads, s.executionConfig.MaxMaxProcessesAndThreads)
-
-	// Max file size
-	params.MaxFileSize = valOrDefaultInt(dto.MaxFileSize, s.executionConfig.DefaultMaxFileSizeKB, s.executionConfig.MaxMaxFileSizeKB)
-
-	// Bool configs
-	params.EnablePerProcessAndThreadTimeLimit = boolOrDefault(dto.EnablePerProcessAndThreadTimeLimit, false)
-	params.EnablePerProcessAndThreadMemoryLimit = boolOrDefault(dto.EnablePerProcessAndThreadMemoryLimit, false)
-	params.RedirectStderrToStdout = boolOrDefault(dto.RedirectStderrToStdout, false)
-
-	// Network: use default, but disallow if not permitted
-	if dto.EnableNetwork != nil {
-		params.EnableNetwork = *dto.EnableNetwork && s.executionConfig.AllowEnableNetwork
-	} else {
-		params.EnableNetwork = s.executionConfig.DefaultEnableNetwork
-	}
+	qtx := s.queries.WithTx(tx)
 
 	dbStart := time.Now()
-	sub, err := s.queries.CreateSubmission(ctx, params)
+	sub, err := qtx.CreateSubmission(ctx, params)
 	metrics.DBOperationDuration.WithLabelValues("create_submission").Observe(time.Since(dbStart).Seconds())
 	if err != nil {
 		metrics.DBFailuresTotal.WithLabelValues("create_submission").Inc()
@@ -143,7 +123,7 @@ func (s *SubmissionsService) CreateSubmission(ctx context.Context, dto submissio
 	if dto.ExpectedOutput != nil {
 		expectedOutput = *dto.ExpectedOutput
 	}
-	_, err = s.queries.CreateTestCaseResult(ctx, queries.CreateTestCaseResultParams{
+	_, err = qtx.CreateTestCaseResult(ctx, queries.CreateTestCaseResultParams{
 		SubmissionID:   sub.ID,
 		Position:       1,
 		Stdin:          pgtype.Text{String: stdin, Valid: true},
@@ -151,6 +131,10 @@ func (s *SubmissionsService) CreateSubmission(ctx context.Context, dto submissio
 	})
 	if err != nil {
 		return 0, fmt.Errorf("failed to create test case result: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	// Resolve language name for metric label
@@ -183,30 +167,24 @@ func (s *SubmissionsService) CreateBatchSubmission(ctx context.Context, dto subm
 		return 0, errors.New("test_cases is required")
 	}
 
-	params := queries.CreateSubmissionParams{
-		LanguageID: dto.LanguageID,
-		SourceCode: dto.SourceCode,
-		Mode:       "batch",
-	}
+	params := s.buildSubmissionParams(dto.LanguageID, dto.SourceCode, "batch",
+		dto.CpuTimeLimit, dto.WallTimeLimit, dto.MemoryLimit, dto.StackLimit,
+		dto.MaxProcessesAndOrThreads, dto.MaxFileSize,
+		dto.EnablePerProcessAndThreadTimeLimit, dto.EnablePerProcessAndThreadMemoryLimit,
+		dto.RedirectStderrToStdout, dto.EnableNetwork,
+	)
 
-	params.CpuTimeLimit = valOrDefault(dto.CpuTimeLimit, s.executionConfig.DefaultCPUTime, s.executionConfig.MaxCPUTime)
-	params.CpuExtraTime = s.executionConfig.DefaultCPUExtraTime
-	params.WallTimeLimit = valOrDefault(dto.WallTimeLimit, s.executionConfig.DefaultWallTime, s.executionConfig.MaxWallTime)
-	params.MemoryLimit = valOrDefaultInt(dto.MemoryLimit, s.executionConfig.DefaultMemoryKB, s.executionConfig.MaxMemoryKB)
-	params.StackLimit = valOrDefaultInt(dto.StackLimit, s.executionConfig.DefaultStackKB, s.executionConfig.MaxStackKB)
-	params.MaxProcessesAndOrThreads = valOrDefaultInt(dto.MaxProcessesAndOrThreads, s.executionConfig.DefaultMaxProcessesAndThreads, s.executionConfig.MaxMaxProcessesAndThreads)
-	params.MaxFileSize = valOrDefaultInt(dto.MaxFileSize, s.executionConfig.DefaultMaxFileSizeKB, s.executionConfig.MaxMaxFileSizeKB)
-	params.EnablePerProcessAndThreadTimeLimit = boolOrDefault(dto.EnablePerProcessAndThreadTimeLimit, false)
-	params.EnablePerProcessAndThreadMemoryLimit = boolOrDefault(dto.EnablePerProcessAndThreadMemoryLimit, false)
-	params.RedirectStderrToStdout = boolOrDefault(dto.RedirectStderrToStdout, false)
-	if dto.EnableNetwork != nil {
-		params.EnableNetwork = *dto.EnableNetwork && s.executionConfig.AllowEnableNetwork
-	} else {
-		params.EnableNetwork = s.executionConfig.DefaultEnableNetwork
+	// Begin transaction
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("failed to begin transaction: %w", err)
 	}
+	defer tx.Rollback(ctx)
+
+	qtx := s.queries.WithTx(tx)
 
 	dbStart := time.Now()
-	sub, err := s.queries.CreateSubmission(ctx, params)
+	sub, err := qtx.CreateSubmission(ctx, params)
 	metrics.DBOperationDuration.WithLabelValues("create_submission").Observe(time.Since(dbStart).Seconds())
 	if err != nil {
 		metrics.DBFailuresTotal.WithLabelValues("create_submission").Inc()
@@ -221,7 +199,7 @@ func (s *SubmissionsService) CreateBatchSubmission(ctx context.Context, dto subm
 			expectedOutput = *tc.ExpectedOutput
 			hasExpected = expectedOutput != ""
 		}
-		_, err = s.queries.CreateTestCaseResult(ctx, queries.CreateTestCaseResultParams{
+		_, err = qtx.CreateTestCaseResult(ctx, queries.CreateTestCaseResultParams{
 			SubmissionID:   sub.ID,
 			Position:       int16(i + 1),
 			Stdin:          pgtype.Text{String: tc.Stdin, Valid: true},
@@ -230,6 +208,10 @@ func (s *SubmissionsService) CreateBatchSubmission(ctx context.Context, dto subm
 		if err != nil {
 			return 0, fmt.Errorf("failed to create test case result %d: %w", i+1, err)
 		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("failed to commit transaction: %w", err)
 	}
 
 	langName := "unknown"
@@ -244,6 +226,35 @@ func (s *SubmissionsService) CreateBatchSubmission(ctx context.Context, dto subm
 	}
 
 	return sub.ID, nil
+}
+
+func (s *SubmissionsService) buildSubmissionParams(
+	languageID int64, sourceCode, mode string,
+	cpuTimeLimit, wallTimeLimit *float64,
+	memoryLimit, stackLimit, maxProcesses, maxFileSize *int32,
+	perProcessTime, perProcessMemory, redirectStderr, enableNetwork *bool,
+) queries.CreateSubmissionParams {
+	params := queries.CreateSubmissionParams{
+		LanguageID: languageID,
+		SourceCode: sourceCode,
+		Mode:       mode,
+	}
+	params.CpuTimeLimit = valOrDefault(cpuTimeLimit, s.executionConfig.DefaultCPUTime, s.executionConfig.MaxCPUTime)
+	params.CpuExtraTime = s.executionConfig.DefaultCPUExtraTime
+	params.WallTimeLimit = valOrDefault(wallTimeLimit, s.executionConfig.DefaultWallTime, s.executionConfig.MaxWallTime)
+	params.MemoryLimit = valOrDefaultInt(memoryLimit, s.executionConfig.DefaultMemoryKB, s.executionConfig.MaxMemoryKB)
+	params.StackLimit = valOrDefaultInt(stackLimit, s.executionConfig.DefaultStackKB, s.executionConfig.MaxStackKB)
+	params.MaxProcessesAndOrThreads = valOrDefaultInt(maxProcesses, s.executionConfig.DefaultMaxProcessesAndThreads, s.executionConfig.MaxMaxProcessesAndThreads)
+	params.MaxFileSize = valOrDefaultInt(maxFileSize, s.executionConfig.DefaultMaxFileSizeKB, s.executionConfig.MaxMaxFileSizeKB)
+	params.EnablePerProcessAndThreadTimeLimit = boolOrDefault(perProcessTime, false)
+	params.EnablePerProcessAndThreadMemoryLimit = boolOrDefault(perProcessMemory, false)
+	params.RedirectStderrToStdout = boolOrDefault(redirectStderr, false)
+	if enableNetwork != nil {
+		params.EnableNetwork = *enableNetwork && s.executionConfig.AllowEnableNetwork
+	} else {
+		params.EnableNetwork = s.executionConfig.DefaultEnableNetwork
+	}
+	return params
 }
 
 func valOrDefault(val *float64, def, max float64) float64 {
@@ -298,14 +309,3 @@ func (s *SubmissionsService) GetTestCaseResults(ctx context.Context, submissionI
 	return results, nil
 }
 
-func (s *SubmissionsService) CompleteSubmission(ctx context.Context, arg queries.CompleteSubmissionParams) {
-	s.queries.CompleteSubmission(ctx, arg)
-}
-
-func (s *SubmissionsService) UpdateSubmissionStatus(ctx context.Context, submissionID int, status string) {
-	arg := queries.UpdateSubmissionStatusParams{
-		ID:     int64(submissionID),
-		Status: status,
-	}
-	s.queries.UpdateSubmissionStatus(ctx, arg)
-}

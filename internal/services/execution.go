@@ -28,12 +28,7 @@ const maxBoxID = 999
 
 var boxIDCounter atomic.Int64
 
-func nextBoxID(hint int64) int {
-	start := int(hint % int64(maxBoxID))
-	for i := 0; i < maxBoxID; i++ {
-		id := (start + i) % maxBoxID
-		_ = id
-	}
+func nextBoxID() int {
 	return int(boxIDCounter.Add(1) % int64(maxBoxID))
 }
 
@@ -143,7 +138,7 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 func (e *ExecutionService) executeSingle(ctx context.Context, span trace.Span, log *zerolog.Logger, sub queries.Submission, lang queries.GetLanguageByIDRow, tc queries.TestCaseResult, startTime time.Time) error {
 	submissionID := sub.ID
 
-	boxID := nextBoxID(submissionID)
+	boxID := nextBoxID()
 	log2 := log.With().Int("box_id", boxID).Logger()
 	log = &log2
 
@@ -209,12 +204,11 @@ func (e *ExecutionService) executeSingle(ctx context.Context, span trace.Span, l
 			compileSpan.End()
 			finishedAt := time.Now()
 			log.Warn().Msg("compilation error, completing submission")
-			e.completeSubmission(ctx, log, sub.ID, "compilation_error", compileOutput, compileMeta, startedAt, finishedAt)
 			e.updateTestCaseResult(ctx, log, tc.ID, "compilation_error", "", "", compileMeta)
 			span.SetAttributes(attribute.String("status", "compilation_error"))
 			metrics.JobsProcessedTotal.WithLabelValues("compilation_error", lang.Name).Inc()
 			metrics.JobDuration.WithLabelValues("total", lang.Name).Observe(time.Since(startTime).Seconds())
-			return nil
+			return e.completeSubmission(ctx, log, sub.ID, "compilation_error", compileOutput, compileMeta, startedAt, finishedAt)
 		}
 
 		compileSpan.SetAttributes(attribute.String("result", "success"))
@@ -272,7 +266,6 @@ func (e *ExecutionService) executeSingle(ctx context.Context, span trace.Span, l
 		Str("status", status).
 		Float64("total_duration_s", finishedAt.Sub(startedAt).Seconds()).
 		Msg("completing submission")
-	e.completeSubmission(ctx, log, sub.ID, status, "", runMeta, startedAt, finishedAt)
 
 	span.SetAttributes(
 		attribute.String("status", status),
@@ -289,7 +282,7 @@ func (e *ExecutionService) executeSingle(ctx context.Context, span trace.Span, l
 	log.Info().
 		Float64("execution_time_s", time.Since(startTime).Seconds()).
 		Msg("execution complete")
-	return nil
+	return e.completeSubmission(ctx, log, sub.ID, status, "", runMeta, startedAt, finishedAt)
 }
 
 func (e *ExecutionService) executeBatch(ctx context.Context, span trace.Span, log *zerolog.Logger, sub queries.Submission, lang queries.GetLanguageByIDRow, testCases []queries.TestCaseResult, startTime time.Time) error {
@@ -308,7 +301,7 @@ func (e *ExecutionService) executeBatch(ctx context.Context, span trace.Span, lo
 		log.Info().Str("compile_cmd", lang.CompileCommand.String).Msg("compiling")
 		e.updateStatus(ctx, log, submissionID, "compiling")
 
-		compileBoxID := nextBoxID(submissionID)
+		compileBoxID := nextBoxID()
 		compileLog := log.With().Int("box_id", compileBoxID).Logger()
 
 		_, compileSpan := telemetry.Tracer("execution").Start(ctx, "sandbox.compile")
@@ -348,7 +341,6 @@ func (e *ExecutionService) executeBatch(ctx context.Context, span trace.Span, lo
 			compileSpan.End()
 			e.cleanupBox(&compileLog, compileBoxID)
 			finishedAt := time.Now()
-			e.completeSubmission(ctx, log, submissionID, "compilation_error", compileOutput, compileMeta, startedAt, finishedAt)
 			// Mark all test cases as compilation_error
 			for _, tc := range testCases {
 				e.updateTestCaseResult(ctx, log, tc.ID, "compilation_error", "", "", compileMeta)
@@ -356,7 +348,7 @@ func (e *ExecutionService) executeBatch(ctx context.Context, span trace.Span, lo
 			span.SetAttributes(attribute.String("status", "compilation_error"))
 			metrics.JobsProcessedTotal.WithLabelValues("compilation_error", lang.Name).Inc()
 			metrics.JobDuration.WithLabelValues("total", lang.Name).Observe(time.Since(startTime).Seconds())
-			return nil
+			return e.completeSubmission(ctx, log, submissionID, "compilation_error", compileOutput, compileMeta, startedAt, finishedAt)
 		}
 
 		compileSpan.SetAttributes(attribute.String("result", "success"))
@@ -390,7 +382,7 @@ func (e *ExecutionService) executeBatch(ctx context.Context, span trace.Span, lo
 			trace.WithAttributes(attribute.Int("position", int(tc.Position))),
 		)
 
-		runBoxID := nextBoxID(submissionID + int64(i))
+		runBoxID := nextBoxID()
 		boxDir, err := e.initBox(&tcLog, runBoxID)
 		if err != nil {
 			tcSpan.RecordError(err)
@@ -493,8 +485,6 @@ func (e *ExecutionService) executeBatch(ctx context.Context, span trace.Span, lo
 		Int("test_cases", len(testCases)).
 		Msg("batch execution complete")
 
-	e.completeSubmission(ctx, log, submissionID, overallStatus, "", aggMeta, startedAt, finishedAt)
-
 	span.SetAttributes(
 		attribute.String("status", overallStatus),
 		attribute.Float64("time_s", totalTime),
@@ -506,7 +496,7 @@ func (e *ExecutionService) executeBatch(ctx context.Context, span trace.Span, lo
 	metrics.JobsProcessedTotal.WithLabelValues(overallStatus, lang.Name).Inc()
 	metrics.JobDuration.WithLabelValues("total", lang.Name).Observe(time.Since(startTime).Seconds())
 
-	return nil
+	return e.completeSubmission(ctx, log, submissionID, overallStatus, "", aggMeta, startedAt, finishedAt)
 }
 
 // copyDir copies all files from src directory to dst directory (non-recursive, files only).
@@ -748,20 +738,24 @@ func (e *ExecutionService) cleanupBox(log *zerolog.Logger, boxID int) {
 // updateStatus updates submission status in the DB.
 func (e *ExecutionService) updateStatus(ctx context.Context, log *zerolog.Logger, submissionID int64, status string) {
 	log.Info().Str("status", status).Msg("status update")
-	e.queries.UpdateSubmissionStatus(ctx, queries.UpdateSubmissionStatusParams{
+	err := e.queries.UpdateSubmissionStatus(ctx, queries.UpdateSubmissionStatusParams{
 		ID:     submissionID,
 		Status: status,
 	})
+	if err != nil {
+		log.Error().Err(err).Str("status", status).Msg("failed to update submission status")
+	}
 }
 
-// completeSubmission writes final results back to the DB.
-func (e *ExecutionService) completeSubmission(ctx context.Context, log *zerolog.Logger, submissionID int64, status, compileOutput string, meta *Metadata, startedAt, finishedAt time.Time) {
+// completeSubmission writes final results back to the DB with retry.
+func (e *ExecutionService) completeSubmission(ctx context.Context, log *zerolog.Logger, submissionID int64, status, compileOutput string, meta *Metadata, startedAt, finishedAt time.Time) error {
 	log.Info().
 		Str("status", status).
 		Float64("time_s", meta.Time).
 		Int32("memory_kb", meta.Memory).
 		Msg("completing submission")
-	e.queries.CompleteSubmission(ctx, queries.CompleteSubmissionParams{
+
+	params := queries.CompleteSubmissionParams{
 		ID:            submissionID,
 		Status:        status,
 		CompileOutput: pgtype.Text{String: compileOutput, Valid: compileOutput != ""},
@@ -772,7 +766,19 @@ func (e *ExecutionService) completeSubmission(ctx context.Context, log *zerolog.
 		Memory:        pgtype.Int4{Int32: meta.Memory, Valid: true},
 		StartedAt:     pgtype.Timestamptz{Time: startedAt, Valid: true},
 		FinishedAt:    pgtype.Timestamptz{Time: finishedAt, Valid: true},
-	})
+	}
+
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		_, err = e.queries.CompleteSubmission(ctx, params)
+		if err == nil {
+			return nil
+		}
+		log.Warn().Err(err).Int("attempt", attempt+1).Msg("failed to complete submission, retrying")
+		time.Sleep(time.Duration(attempt+1) * 500 * time.Millisecond)
+	}
+	log.Error().Err(err).Msg("failed to complete submission after retries")
+	return fmt.Errorf("failed to complete submission %d: %w", submissionID, err)
 }
 
 // updateTestCaseResult writes per-test-case execution results to the DB.

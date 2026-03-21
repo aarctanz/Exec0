@@ -33,11 +33,13 @@ func NewServer(redisAddr string, concurrency int, dbQueries *queries.Queries) *a
 						Int64("submission_id", payload.SubmissionID).
 						Err(err).
 						Msg("submission exhausted all retries, marking as internal_error")
-					dbQueries.CompleteSubmission(ctx, queries.CompleteSubmissionParams{
+					if _, dbErr := dbQueries.CompleteSubmission(ctx, queries.CompleteSubmissionParams{
 						ID:            payload.SubmissionID,
 						Status:        "internal_error",
 						InternalError: pgtype.Text{String: err.Error(), Valid: true},
-					})
+					}); dbErr != nil {
+						log.Error().Err(dbErr).Int64("submission_id", payload.SubmissionID).Msg("failed to mark submission as internal_error")
+					}
 				}
 			}),
 		},
