@@ -46,6 +46,22 @@ func (h *SubmissionsHandler) Create(w http.ResponseWriter, r *http.Request) {
 	util.JSON(w, http.StatusCreated, map[string]int64{"id": id})
 }
 
+func (h *SubmissionsHandler) CreateBatch(w http.ResponseWriter, r *http.Request) {
+	var dto submissions.CreateBatchSubmissionDTO
+	if err := json.NewDecoder(r.Body).Decode(&dto); err != nil {
+		util.Error(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	id, err := h.service.CreateBatchSubmission(r.Context(), dto)
+	if err != nil {
+		util.Error(w, http.StatusUnprocessableEntity, err.Error())
+		return
+	}
+
+	util.JSON(w, http.StatusCreated, map[string]int64{"id": id})
+}
+
 func (h *SubmissionsHandler) Get(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(r.PathValue("id"))
 	if err != nil {

@@ -24,6 +24,7 @@ func SetupRoutes(svc *services.Services, corsOrigins []string, redisAddr string)
 
 	mux.HandleFunc("GET /submissions", submissions.List)
 	mux.HandleFunc("POST /submissions", submissions.Create)
+	mux.HandleFunc("POST /submissions/batch", submissions.CreateBatch)
 	mux.HandleFunc("GET /submissions/{id}", submissions.Get)
 
 	// Queue monitoring API

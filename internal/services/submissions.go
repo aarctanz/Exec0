@@ -168,6 +168,84 @@ func (s *SubmissionsService) CreateSubmission(ctx context.Context, dto submissio
 	return sub.ID, nil
 }
 
+func (s *SubmissionsService) CreateBatchSubmission(ctx context.Context, dto submissions.CreateBatchSubmissionDTO) (int64, error) {
+	ctx, span := telemetry.Tracer("submissions").Start(ctx, "CreateBatchSubmission")
+	defer span.End()
+	span.SetAttributes(attribute.Int64("language_id", dto.LanguageID), attribute.Int("test_case_count", len(dto.TestCases)))
+
+	if dto.LanguageID == 0 {
+		return 0, errors.New("language_id is required")
+	}
+	if dto.SourceCode == "" {
+		return 0, errors.New("source_code is required")
+	}
+	if len(dto.TestCases) == 0 {
+		return 0, errors.New("test_cases is required")
+	}
+
+	params := queries.CreateSubmissionParams{
+		LanguageID: dto.LanguageID,
+		SourceCode: dto.SourceCode,
+		Mode:       "batch",
+	}
+
+	params.CpuTimeLimit = valOrDefault(dto.CpuTimeLimit, s.executionConfig.DefaultCPUTime, s.executionConfig.MaxCPUTime)
+	params.CpuExtraTime = s.executionConfig.DefaultCPUExtraTime
+	params.WallTimeLimit = valOrDefault(dto.WallTimeLimit, s.executionConfig.DefaultWallTime, s.executionConfig.MaxWallTime)
+	params.MemoryLimit = valOrDefaultInt(dto.MemoryLimit, s.executionConfig.DefaultMemoryKB, s.executionConfig.MaxMemoryKB)
+	params.StackLimit = valOrDefaultInt(dto.StackLimit, s.executionConfig.DefaultStackKB, s.executionConfig.MaxStackKB)
+	params.MaxProcessesAndOrThreads = valOrDefaultInt(dto.MaxProcessesAndOrThreads, s.executionConfig.DefaultMaxProcessesAndThreads, s.executionConfig.MaxMaxProcessesAndThreads)
+	params.MaxFileSize = valOrDefaultInt(dto.MaxFileSize, s.executionConfig.DefaultMaxFileSizeKB, s.executionConfig.MaxMaxFileSizeKB)
+	params.EnablePerProcessAndThreadTimeLimit = boolOrDefault(dto.EnablePerProcessAndThreadTimeLimit, false)
+	params.EnablePerProcessAndThreadMemoryLimit = boolOrDefault(dto.EnablePerProcessAndThreadMemoryLimit, false)
+	params.RedirectStderrToStdout = boolOrDefault(dto.RedirectStderrToStdout, false)
+	if dto.EnableNetwork != nil {
+		params.EnableNetwork = *dto.EnableNetwork && s.executionConfig.AllowEnableNetwork
+	} else {
+		params.EnableNetwork = s.executionConfig.DefaultEnableNetwork
+	}
+
+	dbStart := time.Now()
+	sub, err := s.queries.CreateSubmission(ctx, params)
+	metrics.DBOperationDuration.WithLabelValues("create_submission").Observe(time.Since(dbStart).Seconds())
+	if err != nil {
+		metrics.DBFailuresTotal.WithLabelValues("create_submission").Inc()
+		return 0, err
+	}
+
+	// Create test case results for each test case
+	for i, tc := range dto.TestCases {
+		expectedOutput := ""
+		hasExpected := false
+		if tc.ExpectedOutput != nil {
+			expectedOutput = *tc.ExpectedOutput
+			hasExpected = expectedOutput != ""
+		}
+		_, err = s.queries.CreateTestCaseResult(ctx, queries.CreateTestCaseResultParams{
+			SubmissionID:   sub.ID,
+			Position:       int16(i + 1),
+			Stdin:          pgtype.Text{String: tc.Stdin, Valid: true},
+			ExpectedOutput: pgtype.Text{String: expectedOutput, Valid: hasExpected},
+		})
+		if err != nil {
+			return 0, fmt.Errorf("failed to create test case result %d: %w", i+1, err)
+		}
+	}
+
+	langName := "unknown"
+	if lang, err := s.languagesService.GetLanguageByID(ctx, dto.LanguageID); err == nil {
+		langName = lang.Name
+	}
+	metrics.SubmissionsCreatedTotal.WithLabelValues(langName).Inc()
+
+	if err := s.queueClient.EnqueueSubmission(ctx, sub.ID); err != nil {
+		metrics.EnqueueFailuresTotal.Inc()
+		return 0, fmt.Errorf("failed to enqueue submission: %w", err)
+	}
+
+	return sub.ID, nil
+}
+
 func valOrDefault(val *float64, def, max float64) float64 {
 	if val == nil {
 		return def

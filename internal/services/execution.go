@@ -133,6 +133,8 @@ func (e *ExecutionService) Execute(ctx context.Context, submissionID int64) erro
 	switch sub.Mode {
 	case "single":
 		return e.executeSingle(ctx, span, &log, sub, lang, testCases[0], startTime)
+	case "batch":
+		return e.executeBatch(ctx, span, &log, sub, lang, testCases, startTime)
 	default:
 		return fmt.Errorf("unsupported mode: %s", sub.Mode)
 	}
@@ -287,6 +289,250 @@ func (e *ExecutionService) executeSingle(ctx context.Context, span trace.Span, l
 	log.Info().
 		Float64("execution_time_s", time.Since(startTime).Seconds()).
 		Msg("execution complete")
+	return nil
+}
+
+func (e *ExecutionService) executeBatch(ctx context.Context, span trace.Span, log *zerolog.Logger, sub queries.Submission, lang queries.GetLanguageByIDRow, testCases []queries.TestCaseResult, startTime time.Time) error {
+	submissionID := sub.ID
+	startedAt := time.Now()
+
+	// Temp dir for storing compiled artifacts
+	tmpDir, err := os.MkdirTemp("", fmt.Sprintf("exec0-%d-", submissionID))
+	if err != nil {
+		return fmt.Errorf("failed to create temp dir: %w", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Step 1: Compile (if needed)
+	if lang.CompileCommand.Valid {
+		log.Info().Str("compile_cmd", lang.CompileCommand.String).Msg("compiling")
+		e.updateStatus(ctx, log, submissionID, "compiling")
+
+		compileBoxID := nextBoxID(submissionID)
+		compileLog := log.With().Int("box_id", compileBoxID).Logger()
+
+		_, compileSpan := telemetry.Tracer("execution").Start(ctx, "sandbox.compile")
+		boxDir, err := e.initBox(&compileLog, compileBoxID)
+		if err != nil {
+			compileSpan.RecordError(err)
+			compileSpan.SetStatus(codes.Error, "box init failed")
+			compileSpan.End()
+			metrics.SandboxFailuresTotal.WithLabelValues("init").Inc()
+			return fmt.Errorf("failed to init compile box %d: %w", compileBoxID, err)
+		}
+
+		// Write source code (no stdin needed for compilation)
+		if err := e.createFiles(boxDir, sub.SourceCode, lang.SourceFile, ""); err != nil {
+			e.cleanupBox(&compileLog, compileBoxID)
+			compileSpan.End()
+			return fmt.Errorf("failed to create files in compile box: %w", err)
+		}
+
+		metaFile := filepath.Join(os.TempDir(), fmt.Sprintf("isolate_meta_%d.txt", compileBoxID))
+		compileStart := time.Now()
+		compileMeta, compileOutput, err := e.compile(&compileLog, compileBoxID, lang.CompileCommand.String, metaFile, sub)
+		metrics.JobDuration.WithLabelValues("compile", lang.Name).Observe(time.Since(compileStart).Seconds())
+		os.Remove(metaFile)
+
+		if err != nil {
+			compileSpan.RecordError(err)
+			compileSpan.SetStatus(codes.Error, "compile failed")
+			compileSpan.End()
+			e.cleanupBox(&compileLog, compileBoxID)
+			metrics.SandboxFailuresTotal.WithLabelValues("compile").Inc()
+			return fmt.Errorf("compilation error in box %d: %w", compileBoxID, err)
+		}
+
+		if compileMeta.Status != "" || compileMeta.ExitCode != 0 {
+			compileSpan.SetAttributes(attribute.String("result", "compilation_error"))
+			compileSpan.End()
+			e.cleanupBox(&compileLog, compileBoxID)
+			finishedAt := time.Now()
+			e.completeSubmission(ctx, log, submissionID, "compilation_error", compileOutput, compileMeta, startedAt, finishedAt)
+			// Mark all test cases as compilation_error
+			for _, tc := range testCases {
+				e.updateTestCaseResult(ctx, log, tc.ID, "compilation_error", "", "", compileMeta)
+			}
+			span.SetAttributes(attribute.String("status", "compilation_error"))
+			metrics.JobsProcessedTotal.WithLabelValues("compilation_error", lang.Name).Inc()
+			metrics.JobDuration.WithLabelValues("total", lang.Name).Observe(time.Since(startTime).Seconds())
+			return nil
+		}
+
+		compileSpan.SetAttributes(attribute.String("result", "success"))
+		compileSpan.End()
+		log.Info().Msg("compilation succeeded, saving artifacts")
+
+		// Copy compiled artifacts from box to temp dir
+		boxPath := filepath.Join(boxDir, "box")
+		if err := copyDir(boxPath, tmpDir); err != nil {
+			e.cleanupBox(&compileLog, compileBoxID)
+			return fmt.Errorf("failed to copy compiled artifacts: %w", err)
+		}
+		e.cleanupBox(&compileLog, compileBoxID)
+	} else {
+		// Interpreted language: just save source file to temp dir
+		if err := os.WriteFile(filepath.Join(tmpDir, lang.SourceFile), []byte(sub.SourceCode), 0644); err != nil {
+			return fmt.Errorf("failed to write source to temp dir: %w", err)
+		}
+	}
+
+	// Step 2: Run each test case in a fresh box
+	e.updateStatus(ctx, log, submissionID, "running")
+
+	var totalTime, totalWallTime float64
+	var maxMemory int32
+	overallStatus := "accepted"
+
+	for i, tc := range testCases {
+		tcLog := log.With().Int("test_case", i+1).Int16("position", tc.Position).Logger()
+		_, tcSpan := telemetry.Tracer("execution").Start(ctx, fmt.Sprintf("sandbox.run.tc%d", i+1),
+			trace.WithAttributes(attribute.Int("position", int(tc.Position))),
+		)
+
+		runBoxID := nextBoxID(submissionID + int64(i))
+		boxDir, err := e.initBox(&tcLog, runBoxID)
+		if err != nil {
+			tcSpan.RecordError(err)
+			tcSpan.End()
+			metrics.SandboxFailuresTotal.WithLabelValues("init").Inc()
+			tcLog.Error().Err(err).Msg("box init failed for test case")
+			e.updateTestCaseResult(ctx, &tcLog, tc.ID, "internal_error", "", "", &Metadata{})
+			overallStatus = "internal_error"
+			continue
+		}
+
+		// Copy artifacts into box
+		boxPath := filepath.Join(boxDir, "box")
+		if err := copyDir(tmpDir, boxPath); err != nil {
+			tcSpan.End()
+			e.cleanupBox(&tcLog, runBoxID)
+			tcLog.Error().Err(err).Msg("failed to copy artifacts")
+			e.updateTestCaseResult(ctx, &tcLog, tc.ID, "internal_error", "", "", &Metadata{})
+			overallStatus = "internal_error"
+			continue
+		}
+
+		// Write stdin
+		stdin := tc.Stdin.String
+		if err := os.WriteFile(filepath.Join(boxPath, "stdin.txt"), []byte(stdin), 0644); err != nil {
+			tcSpan.End()
+			e.cleanupBox(&tcLog, runBoxID)
+			tcLog.Error().Err(err).Msg("failed to write stdin")
+			e.updateTestCaseResult(ctx, &tcLog, tc.ID, "internal_error", "", "", &Metadata{})
+			overallStatus = "internal_error"
+			continue
+		}
+
+		metaFile := filepath.Join(os.TempDir(), fmt.Sprintf("isolate_meta_%d.txt", runBoxID))
+		runStart := time.Now()
+		runMeta, err := e.run(&tcLog, runBoxID, lang.RunCommand, metaFile, sub)
+		metrics.JobDuration.WithLabelValues("run", lang.Name).Observe(time.Since(runStart).Seconds())
+		os.Remove(metaFile)
+
+		if err != nil {
+			tcSpan.RecordError(err)
+			tcSpan.End()
+			e.cleanupBox(&tcLog, runBoxID)
+			metrics.SandboxFailuresTotal.WithLabelValues("run").Inc()
+			tcLog.Error().Err(err).Msg("run failed for test case")
+			e.updateTestCaseResult(ctx, &tcLog, tc.ID, "internal_error", "", "", &Metadata{})
+			overallStatus = "internal_error"
+			continue
+		}
+
+		stdout, _ := os.ReadFile(filepath.Join(boxPath, "stdout.txt"))
+		stderr, _ := os.ReadFile(filepath.Join(boxPath, "stderr.txt"))
+		e.cleanupBox(&tcLog, runBoxID)
+
+		// Determine per-test-case status
+		tcStatus := "accepted"
+		if runMeta.Status != "" {
+			tcStatus = e.mapIsolateStatus(runMeta.Status)
+		} else if tc.ExpectedOutput.Valid && strings.TrimSpace(string(stdout)) != strings.TrimSpace(tc.ExpectedOutput.String) {
+			tcStatus = "wrong_answer"
+		}
+
+		e.updateTestCaseResult(ctx, &tcLog, tc.ID, tcStatus, string(stdout), string(stderr), runMeta)
+
+		tcSpan.SetAttributes(attribute.String("status", tcStatus))
+		tcSpan.End()
+
+		tcLog.Info().
+			Str("status", tcStatus).
+			Float64("time_s", runMeta.Time).
+			Int32("memory_kb", runMeta.Memory).
+			Msg("test case completed")
+
+		// Aggregate metrics
+		totalTime += runMeta.Time
+		totalWallTime += runMeta.WallTime
+		if runMeta.Memory > maxMemory {
+			maxMemory = runMeta.Memory
+		}
+
+		// Track first non-AC as overall status
+		if overallStatus == "accepted" && tcStatus != "accepted" {
+			overallStatus = tcStatus
+		}
+	}
+
+	finishedAt := time.Now()
+
+	// Build aggregated metadata for submission completion
+	aggMeta := &Metadata{
+		Time:     totalTime,
+		WallTime: totalWallTime,
+		Memory:   maxMemory,
+	}
+
+	log.Info().
+		Str("status", overallStatus).
+		Float64("total_time_s", totalTime).
+		Int32("max_memory_kb", maxMemory).
+		Int("test_cases", len(testCases)).
+		Msg("batch execution complete")
+
+	e.completeSubmission(ctx, log, submissionID, overallStatus, "", aggMeta, startedAt, finishedAt)
+
+	span.SetAttributes(
+		attribute.String("status", overallStatus),
+		attribute.Float64("time_s", totalTime),
+		attribute.Float64("wall_time_s", totalWallTime),
+		attribute.Int64("memory_kb", int64(maxMemory)),
+		attribute.Int("test_case_count", len(testCases)),
+	)
+
+	metrics.JobsProcessedTotal.WithLabelValues(overallStatus, lang.Name).Inc()
+	metrics.JobDuration.WithLabelValues("total", lang.Name).Observe(time.Since(startTime).Seconds())
+
+	return nil
+}
+
+// copyDir copies all files from src directory to dst directory (non-recursive, files only).
+func copyDir(src, dst string) error {
+	entries, err := os.ReadDir(src)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		srcPath := filepath.Join(src, entry.Name())
+		dstPath := filepath.Join(dst, entry.Name())
+		data, err := os.ReadFile(srcPath)
+		if err != nil {
+			return err
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(dstPath, data, info.Mode()); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
