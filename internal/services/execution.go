@@ -254,7 +254,7 @@ func (e *ExecutionService) executeSingle(ctx context.Context, span trace.Span, l
 	// Determine status
 	status := "accepted"
 	if runMeta.Status != "" {
-		status = e.mapIsolateStatus(runMeta.Status)
+		status = e.mapIsolateStatus(runMeta.Status, runMeta, sub.MemoryLimit)
 	} else if tc.ExpectedOutput.Valid && strings.TrimSpace(string(stdout)) != strings.TrimSpace(tc.ExpectedOutput.String) {
 		status = "wrong_answer"
 	}
@@ -440,7 +440,7 @@ func (e *ExecutionService) executeBatch(ctx context.Context, span trace.Span, lo
 		// Determine per-test-case status
 		tcStatus := "accepted"
 		if runMeta.Status != "" {
-			tcStatus = e.mapIsolateStatus(runMeta.Status)
+			tcStatus = e.mapIsolateStatus(runMeta.Status, runMeta, sub.MemoryLimit)
 		} else if tc.ExpectedOutput.Valid && strings.TrimSpace(string(stdout)) != strings.TrimSpace(tc.ExpectedOutput.String) {
 			tcStatus = "wrong_answer"
 		}
@@ -527,11 +527,15 @@ func copyDir(src, dst string) error {
 }
 
 // mapIsolateStatus converts isolate status codes to submission statuses.
-func (e *ExecutionService) mapIsolateStatus(isolateStatus string) string {
+// For signal kills (SG), checks if memory exceeded the limit to classify as memory_limit_exceeded.
+func (e *ExecutionService) mapIsolateStatus(isolateStatus string, meta *Metadata, memoryLimitKB int32) string {
 	switch isolateStatus {
 	case "TO":
 		return "time_limit_exceeded"
 	case "SG":
+		if meta.ExitSignal == 9 && meta.Memory >= memoryLimitKB {
+			return "memory_limit_exceeded"
+		}
 		return "runtime_error"
 	case "RE":
 		return "runtime_error"
@@ -608,18 +612,31 @@ func (e *ExecutionService) buildIsolateArgs(boxID int, metaFile string, sub quer
 	return args
 }
 
+// Fixed compile-time resource limits — independent of submission limits.
+const (
+	compileCPUTime  = 5.0    // seconds
+	compileWallTime = 30.0   // seconds — generous for concurrent javac under CPU contention
+	compileMemoryKB = 512000 // 512MB
+)
+
 // compile runs the compile command inside isolate.
 func (e *ExecutionService) compile(log *zerolog.Logger, boxID int, compileCmd, metaFile string, sub queries.Submission) (*Metadata, string, error) {
 	resolvedCmd := fmt.Sprintf(compileCmd, "")
 
-	args := e.buildIsolateArgs(boxID, metaFile, sub)
-	args = append(args,
-		"--time", fmt.Sprintf("%.1f", sub.WallTimeLimit),
-		"--wall-time", fmt.Sprintf("%.1f", sub.WallTimeLimit*2),
+	args := []string{
+		"--box-id", strconv.Itoa(boxID),
+		"--meta", metaFile,
+		"--cg",
+		"--cg-mem", strconv.Itoa(compileMemoryKB),
+		"--dir=/etc:maybe",
+		"--fsize", strconv.Itoa(int(sub.MaxFileSize)),
+		fmt.Sprintf("--processes=%d", sub.MaxProcessesAndOrThreads),
+		"--time", fmt.Sprintf("%.1f", compileCPUTime),
+		"--wall-time", fmt.Sprintf("%.1f", compileWallTime),
 		"--stderr-to-stdout",
 		"--run", "--",
 		"/bin/bash", "-c", resolvedCmd,
-	)
+	}
 
 	log.Debug().Str("cmd", "isolate "+strings.Join(args, " ")).Msg("compile command")
 
