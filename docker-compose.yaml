@@ -1,7 +1,7 @@
 services:
-  # --- Infrastructure ---
   postgres:
     image: postgres:17
+    restart: unless-stopped
     environment:
       POSTGRES_USER: ${DATABASE_USER}
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
@@ -10,31 +10,30 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./database/migrations:/migrations:ro
       - ./deploy/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
-    ports:
-      - "5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER}"]
-      interval: 3s
+      test: ["CMD-SHELL", "pg_isready -U ${DATABASE_USER} -d ${DATABASE_NAME}"]
+      interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20
+    networks:
+      - core
 
   redis:
     image: redis:7-alpine
-    ports:
-      - "6379:6379"
+    restart: unless-stopped
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 3s
+      interval: 5s
       timeout: 3s
-      retries: 10
+      retries: 20
+    networks:
+      - core
 
-  # --- Application ---
-  exec0-api:
+  api:
     build:
       context: .
       target: api
-    ports:
-      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
+    restart: unless-stopped
     env_file: .env
     environment:
       DATABASE_HOST: postgres
@@ -45,66 +44,79 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    ports:
+      - "${SERVER_PORT:-8080}:${SERVER_PORT:-8080}"
+    networks:
+      - core
+      - observability
 
-  exec0-worker:
+  worker:
     build:
       context: .
       target: worker
+    restart: unless-stopped
     privileged: true
     cgroup: host
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    ports:
-      - "${WORKER_METRICS_PORT:-9091}:${WORKER_METRICS_PORT:-9091}"
     env_file: .env
     environment:
       DATABASE_HOST: postgres
       REDIS_ADDRESS: redis:6379
       OTEL_ENDPOINT: otel-collector:4317
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
+    networks:
+      - core
+      - observability
 
-  # --- Observability ---
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.120.0
+    restart: unless-stopped
     volumes:
       - ./deploy/otel-collector/config.yaml:/etc/otelcol-contrib/config.yaml:ro
-    ports:
-      - "4317:4317"
-      - "4318:4318"
+    command: ["--config=/etc/otelcol-contrib/config.yaml"]
+    networks:
+      - observability
 
   tempo:
     image: grafana/tempo:2.7.2
+    restart: unless-stopped
     volumes:
       - ./deploy/tempo/config.yaml:/etc/tempo/config.yaml:ro
       - tempodata:/var/tempo
     command: ["-config.file=/etc/tempo/config.yaml"]
-    ports:
-      - "3200:3200"
+    networks:
+      - observability
 
   loki:
     image: grafana/loki:3.4.3
+    restart: unless-stopped
     volumes:
       - ./deploy/loki/config.yaml:/etc/loki/config.yaml:ro
       - lokidata:/loki
     command: ["-config.file=/etc/loki/config.yaml"]
-    ports:
-      - "3100:3100"
+    networks:
+      - observability
 
   promtail:
     image: grafana/promtail:3.4.3
+    restart: unless-stopped
     volumes:
       - ./deploy/promtail/config.yaml:/etc/promtail/config.yaml:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
     command: ["-config.file=/etc/promtail/config.yaml"]
     depends_on:
       - loki
+    networks:
+      - observability
 
   prometheus:
     image: prom/prometheus:v3.2.1
+    restart: unless-stopped
     volumes:
       - ./deploy/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yml:ro
       - promdata:/prometheus
@@ -112,10 +124,13 @@ services:
       - --config.file=/etc/prometheus/prometheus.yml
       - --web.enable-remote-write-receiver
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
+    networks:
+      - observability
 
   grafana:
     image: grafana/grafana:11.5.2
+    restart: unless-stopped
     volumes:
       - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafanadata:/var/lib/grafana
@@ -125,7 +140,13 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "true"
       GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
     ports:
-      - "3000:3000"
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    networks:
+      - observability
 
 volumes:
   pgdata:
@@ -133,3 +154,9 @@ volumes:
   lokidata:
   promdata:
   grafanadata:
+
+networks:
+  core:
+    driver: bridge
+  observability:
+    driver: bridge

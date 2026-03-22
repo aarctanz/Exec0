@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 
@@ -13,16 +14,18 @@ import (
 
 type RouteResources struct {
 	Handler    http.Handler
+	Health     *handlers.HealthHandler
 	Monitoring *handlers.MonitoringHandler
 }
 
-func SetupRoutes(svc *services.Services, corsOrigins []string, redisAddr string) *RouteResources {
+func SetupRoutes(pool *pgxpool.Pool, svc *services.Services, allowedIPs []string, redisAddr string) *RouteResources {
 	mux := http.NewServeMux()
 
+	health := handlers.NewHealthHandler(pool, redisAddr)
 	languages := handlers.NewLanguagesHandler(svc.LanguagesService)
 	submissions := handlers.NewSubmissionsHandler(svc.SubmissionsService)
 
-	mux.HandleFunc("GET /health", handlers.Health)
+	mux.HandleFunc("GET /health", health.Check)
 
 	mux.HandleFunc("GET /languages", languages.List)
 	mux.HandleFunc("GET /languages/{id}", languages.Get)
@@ -40,9 +43,11 @@ func SetupRoutes(svc *services.Services, corsOrigins []string, redisAddr string)
 	// Prometheus metrics
 	mux.Handle("GET /metrics", promhttp.Handler())
 
-	// Middleware chain: recovery → metrics → otelhttp → logging → CORS → router
+	// Middleware chain: recovery → metrics → otelhttp → logging → IP allowlist → router
 	var handler http.Handler = mux
-	handler = middleware.CORS(corsOrigins)(handler)
+	if len(allowedIPs) > 0 {
+		handler = middleware.IPAllowlist(allowedIPs)(handler)
+	}
 	handler = middleware.Logging(handler)
 	handler = otelhttp.NewHandler(handler, "http.request")
 	handler = middleware.Metrics(handler)
@@ -50,6 +55,7 @@ func SetupRoutes(svc *services.Services, corsOrigins []string, redisAddr string)
 
 	return &RouteResources{
 		Handler:    handler,
+		Health:     health,
 		Monitoring: monitoring,
 	}
 }

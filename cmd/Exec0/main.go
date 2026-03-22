@@ -59,8 +59,9 @@ func main() {
 	queries := queries.New(srv.DB.Pool)
 	svc := services.New(srv.DB.Pool, queries, queueClient)
 
-	routes := server.SetupRoutes(svc, cfg.Server.CORSAllowedOrigins, cfg.Redis.Address)
+	routes := server.SetupRoutes(srv.DB.Pool, svc, cfg.Server.AllowedIPs, cfg.Redis.Address)
 	defer routes.Monitoring.Close()
+	defer routes.Health.Close()
 	srv.SetupHTTPServer(routes.Handler)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)

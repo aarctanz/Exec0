@@ -1,0 +1,594 @@
+openapi: 3.1.0
+info:
+  title: Exec0
+  description: Stateless code execution engine. Accepts code submissions with optional test cases, executes in isolated sandboxes with configurable resource limits, and returns raw execution results.
+  version: 1.0.0
+
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+paths:
+  /health:
+    get:
+      summary: Health check
+      operationId: health
+      responses:
+        "200":
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /languages:
+    get:
+      summary: List available languages
+      operationId: listLanguages
+      responses:
+        "200":
+          description: List of languages
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Language"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /languages/{id}:
+    get:
+      summary: Get language by ID
+      operationId: getLanguage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: Language details
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Language"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /submissions:
+    get:
+      summary: List submissions
+      operationId: listSubmissions
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: per_page
+          in: query
+          schema:
+            type: integer
+            default: 20
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: Paginated list of submissions
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SubmissionSummary"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+    post:
+      summary: Create single-mode submission
+      description: |
+        Submits code with a single stdin/expected_output pair.
+        If `expected_output` is provided, stdout is compared (trimmed) and status is set to `wrong_answer` on mismatch.
+        If `expected_output` is omitted, any successful execution returns `accepted`.
+        All resource limit fields are optional — defaults are applied server-side.
+      operationId: createSubmission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateSubmissionRequest"
+      responses:
+        "201":
+          description: Submission created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /submissions/batch:
+    post:
+      summary: Create batch-mode submission
+      description: |
+        Submits code with multiple test cases. The code is compiled once and executed against each test case in an isolated sandbox.
+        Each test case can optionally include `expected_output` — if provided, stdout is compared and status is set per test case.
+        Resource limits apply per test case execution.
+        Submission-level `time` is the sum across all test cases, `memory` is the max.
+        Submission-level `status` is the first non-accepted verdict, or `accepted` if all pass.
+      operationId: createBatchSubmission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateBatchSubmissionRequest"
+      responses:
+        "201":
+          description: Batch submission created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CreateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "422":
+          $ref: "#/components/responses/ValidationError"
+
+  /submissions/{id}:
+    get:
+      summary: Get submission with test case results
+      description: |
+        Returns the submission details along with all test case results.
+        For single-mode submissions, `stdout`, `stderr`, and `exit_code` are also flattened at the top level for convenience.
+        Poll this endpoint until `status` is not in `[pending, compiling, running]`.
+      operationId: getSubmission
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: integer
+            format: int64
+      responses:
+        "200":
+          description: Submission with test case results
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SubmissionResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "500":
+          $ref: "#/components/responses/InternalError"
+
+  /monitoring/queues:
+    get:
+      summary: Queue statistics
+      operationId: getQueues
+      responses:
+        "200":
+          description: Queue stats
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/QueueStats"
+
+  /monitoring/history:
+    get:
+      summary: Queue processing history
+      operationId: getHistory
+      parameters:
+        - name: queue
+          in: query
+          schema:
+            type: string
+            default: default
+      responses:
+        "200":
+          description: Daily processing stats
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DailyStats"
+
+  /metrics:
+    get:
+      summary: Prometheus metrics
+      operationId: getMetrics
+      responses:
+        "200":
+          description: Prometheus text format metrics
+          content:
+            text/plain:
+              schema:
+                type: string
+
+components:
+  schemas:
+    Language:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 1
+        name:
+          type: string
+          example: C++
+        version:
+          type: string
+          example: GCC 14.2.0
+        is_archived:
+          type: boolean
+          example: false
+
+    ResourceLimits:
+      type: object
+      description: All fields are optional. Server applies defaults when omitted.
+      properties:
+        cpu_time_limit:
+          type: number
+          format: double
+          description: CPU time limit in seconds
+          default: 5
+          maximum: 15
+        wall_time_limit:
+          type: number
+          format: double
+          description: Wall clock time limit in seconds
+          default: 10
+          maximum: 20
+        memory_limit:
+          type: integer
+          format: int32
+          description: Memory limit in KB
+          default: 256000
+          maximum: 512000
+        stack_limit:
+          type: integer
+          format: int32
+          description: Stack size limit in KB
+          default: 64000
+          maximum: 128000
+        max_processes_and_or_threads:
+          type: integer
+          format: int32
+          default: 60
+          maximum: 120
+        enable_per_process_and_thread_time_limit:
+          type: boolean
+          default: false
+        enable_per_process_and_thread_memory_limit:
+          type: boolean
+          default: false
+        max_file_size:
+          type: integer
+          format: int32
+          description: Max file size in KB
+          default: 4096
+          maximum: 8192
+        redirect_stderr_to_stdout:
+          type: boolean
+          default: false
+        enable_network:
+          type: boolean
+          default: false
+
+    CreateSubmissionRequest:
+      allOf:
+        - type: object
+          required:
+            - language_id
+            - source_code
+          properties:
+            language_id:
+              type: integer
+              format: int64
+              example: 1
+            source_code:
+              type: string
+              example: "#include<iostream>\nusing namespace std;\nint main(){int a,b;cin>>a>>b;cout<<a+b;}"
+            stdin:
+              type: string
+              nullable: true
+              example: "3 5"
+            expected_output:
+              type: string
+              nullable: true
+              description: If provided, stdout is trimmed and compared. Mismatch results in wrong_answer status.
+              example: "8"
+        - $ref: "#/components/schemas/ResourceLimits"
+
+    TestCaseInput:
+      type: object
+      required:
+        - stdin
+      properties:
+        stdin:
+          type: string
+          example: "3 5"
+        expected_output:
+          type: string
+          nullable: true
+          description: If provided for this test case, stdout is compared. If omitted, any successful run is accepted.
+          example: "8"
+
+    CreateBatchSubmissionRequest:
+      allOf:
+        - type: object
+          required:
+            - language_id
+            - source_code
+            - test_cases
+          properties:
+            language_id:
+              type: integer
+              format: int64
+              example: 1
+            source_code:
+              type: string
+              example: "#include<iostream>\nusing namespace std;\nint main(){int a,b;cin>>a>>b;cout<<a+b;}"
+            test_cases:
+              type: array
+              minItems: 1
+              items:
+                $ref: "#/components/schemas/TestCaseInput"
+        - $ref: "#/components/schemas/ResourceLimits"
+
+    CreateResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          example: 42
+
+    SubmissionResponse:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        language_id:
+          type: integer
+          format: int64
+        source_code:
+          type: string
+        mode:
+          type: string
+          enum: [single, batch]
+        status:
+          type: string
+          enum: [pending, compiling, running, accepted, wrong_answer, time_limit_exceeded, memory_limit_exceeded, runtime_error, compilation_error, internal_error]
+        compile_output:
+          type: string
+          description: Compiler output (populated on compilation_error)
+        message:
+          type: string
+          description: Isolate message (e.g. "Time limit exceeded")
+        time:
+          type: number
+          format: double
+          description: "CPU time in seconds. Single: from the test case. Batch: sum across all test cases."
+        wall_time:
+          type: number
+          format: double
+          description: "Wall time in seconds. Single: from the test case. Batch: sum across all test cases."
+        memory:
+          type: integer
+          format: int32
+          description: "Memory in KB. Single: from the test case. Batch: max across all test cases."
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        test_cases:
+          type: array
+          items:
+            $ref: "#/components/schemas/TestCaseResult"
+        # Flattened from first test case (single-mode convenience)
+        stdout:
+          type: string
+          nullable: true
+          description: Stdout from first test case (convenience for single mode)
+        stderr:
+          type: string
+          nullable: true
+          description: Stderr from first test case (convenience for single mode)
+        exit_code:
+          type: integer
+          format: int32
+          nullable: true
+          description: Exit code from first test case (convenience for single mode)
+
+    TestCaseResult:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+        position:
+          type: integer
+          format: int16
+          description: 1-indexed test case position
+        stdin:
+          type: string
+        expected_output:
+          type: string
+          description: Empty string if not provided
+        stdout:
+          type: string
+        stderr:
+          type: string
+        exit_code:
+          type: integer
+          format: int32
+        exit_signal:
+          type: integer
+          format: int32
+        status:
+          type: string
+          enum: [pending, accepted, wrong_answer, time_limit_exceeded, memory_limit_exceeded, runtime_error, compilation_error, internal_error]
+        time:
+          type: number
+          format: double
+          description: CPU time in seconds
+        wall_time:
+          type: number
+          format: double
+          description: Wall clock time in seconds
+        memory:
+          type: integer
+          format: int32
+          description: Peak memory usage in KB
+
+    SubmissionSummary:
+      type: object
+      description: Submission as returned by list endpoint (no test case details)
+      properties:
+        id:
+          type: integer
+          format: int64
+        language_id:
+          type: integer
+          format: int64
+        source_code:
+          type: string
+        status:
+          type: string
+        mode:
+          type: string
+          enum: [single, batch]
+        compile_output:
+          type: string
+        message:
+          type: string
+        time:
+          type: number
+          format: double
+        wall_time:
+          type: number
+          format: double
+        memory:
+          type: integer
+          format: int32
+        started_at:
+          type: string
+          format: date-time
+        finished_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    QueueStats:
+      type: object
+      properties:
+        queue:
+          type: string
+          example: default
+        size:
+          type: integer
+        pending:
+          type: integer
+        active:
+          type: integer
+        scheduled:
+          type: integer
+        retry:
+          type: integer
+        archived:
+          type: integer
+        completed:
+          type: integer
+        processed:
+          type: integer
+        failed:
+          type: integer
+        processed_total:
+          type: integer
+        failed_total:
+          type: integer
+        latency_ms:
+          type: integer
+          format: int64
+        memory_usage:
+          type: integer
+          format: int64
+        paused:
+          type: boolean
+
+    DailyStats:
+      type: object
+      properties:
+        date:
+          type: string
+          example: "2026-03-21"
+        processed:
+          type: integer
+        failed:
+          type: integer
+
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+
+  responses:
+    BadRequest:
+      description: Bad request
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    ValidationError:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"

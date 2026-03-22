@@ -30,11 +30,11 @@ type PrimaryConfig struct {
 }
 
 type ServerConfig struct {
-	Port               string   `env:"PORT" env-required:"true"`
-	ReadTimeout        int      `env:"READ_TIMEOUT" env-required:"true"`
-	WriteTimeout       int      `env:"WRITE_TIMEOUT" env-required:"true"`
-	IdleTimeout        int      `env:"IDLE_TIMEOUT" env-required:"true"`
-	CORSAllowedOrigins []string `env:"CORS_ALLOWED_ORIGINS" env-required:"true"`
+	Port        string   `env:"PORT" env-required:"true"`
+	ReadTimeout int      `env:"READ_TIMEOUT" env-required:"true"`
+	WriteTimeout int     `env:"WRITE_TIMEOUT" env-required:"true"`
+	IdleTimeout int      `env:"IDLE_TIMEOUT" env-required:"true"`
+	AllowedIPs  []string `env:"ALLOWED_IPS"`
 }
 
 type DatabaseConfig struct {
