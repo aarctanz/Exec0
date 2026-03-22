@@ -9,6 +9,10 @@ mkdir -p /run/isolate/locks
 CGROUP_BASE="/sys/fs/cgroup"
 
 if [ -d "$CGROUP_BASE" ]; then
+    # Remount cgroup filesystem read-write if it's mounted read-only
+    # (common on systemd-based hosts even with privileged containers)
+    mount -o remount,rw "$CGROUP_BASE" 2>/dev/null || true
+
     ISOLATE_CG="$CGROUP_BASE/isolate"
     mkdir -p "$ISOLATE_CG"
 
