@@ -17,7 +17,8 @@ scrape_configs:
       - source_labels: ["__meta_docker_container_name"]
         regex: ".*exec0-(api|worker).*"
         action: keep
-      - source_labels: ["__meta_docker_container_label_com_docker_compose_service"]
+      - source_labels:
+          ["__meta_docker_container_label_com_docker_compose_service"]
         target_label: service
       - source_labels: ["__meta_docker_container_name"]
         regex: "/?(.*)"

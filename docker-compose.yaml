@@ -1,13 +1,13 @@
 services:
   postgres:
-    image: postgres:17
+    image: postgres:18.3-bookworm
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${DATABASE_USER}
       POSTGRES_PASSWORD: ${DATABASE_PASSWORD}
       POSTGRES_DB: ${DATABASE_NAME}
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql/18/docker
       - ./database/migrations:/migrations:ro
       - ./deploy/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
     healthcheck:

@@ -35,16 +35,17 @@ func main() {
 	// OpenTelemetry tracing
 	otelEndpoint := cfg.OTel.Endpoint
 	if otelEndpoint == "" {
-		otelEndpoint = "localhost:4317"
+		otelEndpoint = "otel-collector:4317"
 	}
 	otelServiceName := cfg.OTel.ServiceName
 	if otelServiceName == "" {
-		otelServiceName = "exec0-api"
+		otelServiceName = "api"
 	}
 	shutdownTracer, err := telemetry.Init(context.Background(), otelServiceName, otelEndpoint)
 	if err != nil {
 		log.Warn().Err(err).Msg("failed to init OTel tracing, continuing without it")
 	} else {
+		log.Info().Str("otel_endpoint", otelEndpoint).Str("otel_service", otelServiceName).Msg("otel configured")
 		defer shutdownTracer(context.Background())
 	}
 
