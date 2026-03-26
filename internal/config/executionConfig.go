@@ -19,6 +19,8 @@ type ExecutionConfig struct {
 	MaxNumberOfRuns               int32
 	DefaultEnableNetwork          bool
 	AllowEnableNetwork            bool
+	MaxStdoutBytes                int
+	MaxStderrBytes                int
 }
 
 func DefaultExecutionConfig() *ExecutionConfig {
@@ -41,5 +43,7 @@ func DefaultExecutionConfig() *ExecutionConfig {
 		MaxNumberOfRuns:               20,
 		DefaultEnableNetwork:          false,
 		AllowEnableNetwork:            true,
+		MaxStdoutBytes:                10485760,
+		MaxStderrBytes:                10485760,
 	}
 }

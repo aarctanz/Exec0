@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
 
+	"github.com/aarctanz/Exec0/internal/config"
 	"github.com/aarctanz/Exec0/internal/database/queries"
 	"github.com/aarctanz/Exec0/internal/logger"
 	"github.com/aarctanz/Exec0/internal/metrics"
@@ -34,11 +35,13 @@ func nextBoxID() int {
 
 type ExecutionService struct {
 	queries *queries.Queries
+	config  *config.ExecutionConfig
 }
 
-func NewExecutionService(queries *queries.Queries) *ExecutionService {
+func NewExecutionService(queries *queries.Queries, cfg *config.ExecutionConfig) *ExecutionService {
 	return &ExecutionService{
 		queries: queries,
+		config:  cfg,
 	}
 }
 
@@ -247,9 +250,9 @@ func (e *ExecutionService) executeSingle(ctx context.Context, span trace.Span, l
 		Str("message", runMeta.Message).
 		Msg("run done")
 
-	stdout, _ := os.ReadFile(filepath.Join(boxDir, "box", "stdout.txt"))
-	stderr, _ := os.ReadFile(filepath.Join(boxDir, "box", "stderr.txt"))
-	log.Info().Int("stdout_bytes", len(stdout)).Int("stderr_bytes", len(stderr)).Msg("output read")
+	stdout, stdoutTruncated := e.readOutputWithLimit(log, filepath.Join(boxDir, "box", "stdout.txt"), e.config.MaxStdoutBytes)
+	stderr, stderrTruncated := e.readOutputWithLimit(log, filepath.Join(boxDir, "box", "stderr.txt"), e.config.MaxStderrBytes)
+	log.Info().Int("stdout_bytes", len(stdout)).Bool("stdout_truncated", stdoutTruncated).Int("stderr_bytes", len(stderr)).Bool("stderr_truncated", stderrTruncated).Msg("output read")
 
 	// Determine status
 	status := "accepted"
@@ -433,8 +436,8 @@ func (e *ExecutionService) executeBatch(ctx context.Context, span trace.Span, lo
 			continue
 		}
 
-		stdout, _ := os.ReadFile(filepath.Join(boxPath, "stdout.txt"))
-		stderr, _ := os.ReadFile(filepath.Join(boxPath, "stderr.txt"))
+		stdout, _ := e.readOutputWithLimit(&tcLog, filepath.Join(boxPath, "stdout.txt"), e.config.MaxStdoutBytes)
+		stderr, _ := e.readOutputWithLimit(&tcLog, filepath.Join(boxPath, "stderr.txt"), e.config.MaxStderrBytes)
 		e.cleanupBox(&tcLog, runBoxID)
 
 		// Determine per-test-case status
@@ -524,6 +527,23 @@ func copyDir(src, dst string) error {
 		}
 	}
 	return nil
+}
+
+// readOutputWithLimit reads a file and truncates if it exceeds the size limit.
+// Returns the content (possibly truncated) and a flag indicating if truncation occurred.
+func (e *ExecutionService) readOutputWithLimit(log *zerolog.Logger, path string, maxBytes int) ([]byte, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		log.Warn().Err(err).Str("path", path).Msg("failed to read output file")
+		return []byte{}, false
+	}
+
+	if len(data) > maxBytes {
+		log.Warn().Str("path", filepath.Base(path)).Int("size_bytes", len(data)).Int("max_bytes", maxBytes).Msg("output truncated due to size limit")
+		return append(data[:maxBytes], []byte("...")...), true
+	}
+
+	return data, false
 }
 
 // mapIsolateStatus converts isolate status codes to submission statuses.

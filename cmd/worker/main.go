@@ -73,7 +73,8 @@ func main() {
 	defer db.Pool.Close()
 
 	queries := dbqueries.New(db.Pool)
-	executionService := services.NewExecutionService(queries)
+	executionConfig := config.DefaultExecutionConfig()
+	executionService := services.NewExecutionService(queries, executionConfig)
 
 	submissionHandler := func(ctx context.Context, t *asynq.Task) error {
 		var payload tasks.SubmissionPayload

@@ -7,12 +7,13 @@ import (
 )
 
 type Config struct {
-	Primary  PrimaryConfig  `env-prefix:"PRIMARY_"`
-	Server   ServerConfig   `env-prefix:"SERVER_"`
-	Database DatabaseConfig `env-prefix:"DATABASE_"`
-	Redis    RedisConfig    `env-prefix:"REDIS_"`
-	Worker   WorkerConfig   `env-prefix:"WORKER_"`
-	OTel     OTelConfig     `env-prefix:"OTEL_"`
+	Primary   PrimaryConfig    `env-prefix:"PRIMARY_"`
+	Server    ServerConfig     `env-prefix:"SERVER_"`
+	Database  DatabaseConfig   `env-prefix:"DATABASE_"`
+	Redis     RedisConfig      `env-prefix:"REDIS_"`
+	Worker    WorkerConfig     `env-prefix:"WORKER_"`
+	OTel      OTelConfig       `env-prefix:"OTEL_"`
+	Execution ExecutionConfig  `env-prefix:"EXECUTION_"`
 }
 
 type OTelConfig struct {
