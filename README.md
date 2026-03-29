@@ -1,7 +1,8 @@
 # Exec0
 
-A code execution service API built in Go. Submit code, run it in an [isolate](https://github.com/ioi/isolate) sandbox with configurable resource limits, and retrieve results asynchronously.
+A code execution service API built in Go. Submit code, run it in a sandbox with configurable resource limits, and retrieve results asynchronously.
 
+![Architecture Diagram](assets/Exec0-Excalidraw-diagram.png)
 ## Features
 
 - **Sandboxed execution** via isolate with cgroups — CPU, memory, wall time, processes, file size, network, and stack limits
@@ -13,7 +14,7 @@ A code execution service API built in Go. Submit code, run it in an [isolate](ht
 ## Requirements
 
 - Go 1.26+
-- PostgreSQL
+- PostgreSQL 18.3+
 - Redis
 - [isolate](https://github.com/ioi/isolate) (with cgroup support enabled)
 
@@ -24,7 +25,6 @@ The fastest way to get everything running — API, worker, database, queue, and 
 ```bash
 # 1. Copy and configure environment
 cp .env.sample .env
-# Edit .env if needed (defaults work out of the box for Docker)
 
 # 2. Start everything
 docker compose up -d
@@ -48,27 +48,6 @@ This starts 10 services:
 | prometheus | 9090 | Metrics scraping |
 | grafana | 3000 | Dashboards (admin/admin) |
 
-## Local Development (without Docker)
-
-```bash
-# 1. Copy and configure environment
-cp .env.sample .env
-# Set DATABASE_HOST=localhost, REDIS_ADDRESS=localhost:6379, PRIMARY_ENV=local
-
-# 2. Start PostgreSQL and Redis locally
-
-# 3. Run database migrations
-migrate -source file://database/migrations \
-  -database "postgres://user:pass@localhost:5432/exec0?sslmode=disable" up
-
-# 4. Start the API server
-go run cmd/Exec0/main.go
-
-# 5. Start the worker (in a separate terminal)
-go run cmd/worker/main.go
-```
-
-Requires Go 1.26+, PostgreSQL, Redis, and [isolate](https://github.com/ioi/isolate) with cgroup support.
 
 ## API
 
@@ -113,37 +92,6 @@ All resource limit fields are optional — server defaults apply when omitted.
 
 `pending` → `compiling` → `running` → `accepted` | `compilation_error` | `runtime_error` | `time_limit_exceeded` | `internal_error`
 
-## Architecture
-
-```
-cmd/
-  Exec0/main.go           # API server entry point
-  worker/main.go           # Queue worker entry point
-internal/
-  config/                  # Environment config + execution defaults
-  database/                # PostgreSQL connection pool
-  database/queries/        # sqlc-generated type-safe DB code
-  handlers/                # HTTP handlers (languages, submissions, health, monitoring)
-  logger/                  # zerolog setup + context helpers
-  metrics/                 # Prometheus metrics definitions
-  middleware/              # CORS, logging, metrics, panic recovery
-  models/                  # DTOs
-  queue/                   # asynq client (enqueue) and server (dequeue)
-  server/                  # HTTP server + route registration
-  services/                # Business logic (execution, submissions, languages)
-  telemetry/               # OpenTelemetry tracing init
-  util/                    # Response helpers
-database/
-  queries/                 # SQL files for sqlc
-  migrations/              # Timestamped migration files
-deploy/                    # Docker infrastructure configs
-  grafana/                 # Grafana datasource provisioning
-  loki/                    # Loki config
-  otel-collector/          # OTel Collector config
-  prometheus/              # Prometheus scrape config
-  promtail/                # Promtail Docker log collection config
-  tempo/                   # Tempo trace storage config
-```
 
 ## Supported Languages
 
