@@ -43,7 +43,7 @@ func DefaultExecutionConfig() *ExecutionConfig {
 		MaxNumberOfRuns:               20,
 		DefaultEnableNetwork:          false,
 		AllowEnableNetwork:            true,
-		MaxStdoutBytes:                10485760,
-		MaxStderrBytes:                10485760,
+		MaxStdoutBytes:                1048576,
+		MaxStderrBytes:                1048576,
 	}
 }
